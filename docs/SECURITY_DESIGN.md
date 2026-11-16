@@ -27,7 +27,7 @@ Until the security work is implemented and tested, HYBRID-01 must describe messa
 - Store private identity material using Android Keystore-backed protection. Key loss or device reset creates a new identity and requires peers to verify it again; do not silently treat a replacement key as the same person.
 - No central server or account service is required.
 
-**Decision needed:** Is in-person QR/fingerprint verification acceptable for the demo? It is realistic for a small set of presentation devices and avoids claiming that BLE discovery authenticates a person.
+**Selected default for HYBRID-01:** require in-person QR/fingerprint verification for demo peers. Until a fingerprint is confirmed, show the peer as `unverified`; BLE discovery alone must never imply identity. This is a deliberate, workable trust ceremony for a small presentation group.
 
 ## 4. Message protection and wire-format direction
 
@@ -48,7 +48,7 @@ The current flood router needs a destination to decide whether to deliver or for
 
 A relay may update `hop_count`, so that mutable field must not be included in a signature that relays would invalidate. The sender-authenticated fields and the relay-mutated fields must be clearly separated in the protocol. `max_hops` and expiry policy should be immutable and authenticated.
 
-**SOS scope:** broadcast SOS needs an explicit recipient/group-key policy. Do not accidentally claim E2EE for a broadcast merely because one-to-one text is encrypted. Either define a verified participant group and its key lifecycle, or keep SOS out of the encrypted feature claim until that is designed.
+**Selected first-release scope:** secure one-to-one text only. SOS/group encryption is deferred until verified group membership, key distribution, member removal, and key rotation are designed. In the meantime, the app must warn that SOS content and coordinates are plaintext; never present SOS as encrypted.
 
 ## 5. Delivery receipts
 
@@ -98,12 +98,22 @@ Before describing the secure mode as implemented, test that:
 7. Restart and queue expiry preserve the agreed security behavior, while delivery remains independent of the dashboard and internet.
 8. Local stored history is protected at rest, and diagnostics contain no plaintext or key material.
 
-## 10. Proposed implementation order
+## 10. Initial library assessment
 
-1. Agree on key verification, SOS/group scope, and the exact meaning of a receipt.
-2. Compare maintained protocol/library candidates for offline asynchronous delivery, Android support, interoperability, and licensing. Record the selected protocol and its limitations.
+A source-level review of candidate repositories on 2026-11-16 found:
+
+- [`dint-dev/cryptography`](https://github.com/dint-dev/cryptography) is Apache-2.0 licensed and its Dart package exposes primitives including X25519, Ed25519, AES-GCM, and HKDF. Its companion `cryptography_flutter` package uses platform APIs on Android. This is a plausible primitive provider, **not** a complete asynchronous messaging protocol; using it alone would leave us responsible for protocol composition, key lifecycle, and review.
+- [`signalapp/libsignal`](https://github.com/signalapp/libsignal) contains the Signal Protocol and Double Ratchet, with Rust implementations exposed through Java, Swift, and TypeScript APIs. Its repository is AGPL-3.0, and its README says use outside Signal is unsupported. Android/Kotlin integration may be possible, but it adds JNI/Rust integration and distribution/licence obligations; it is not a drop-in Flutter protocol package.
+- [`Nitish987/signal-protocol-dart-implementation`](https://github.com/Nitish987/signal-protocol-dart-implementation) describes itself as a Dart Signal implementation, but GitHub reports no repository licence and its latest repository update is 2024-12. Do not use it as a dependency without a licence and maintenance audit.
+
+**Recommendation:** do not compose a home-grown protocol from primitives just to move quickly, and do not adopt an unlicensed clone. Before implementation, do a focused compatibility/licence review of using official libsignal through a small Android platform-channel layer versus finding another maintained, licensed implementation. If neither is suitable, keep the demo explicitly plaintext rather than claiming encryption.
+
+## 11. Proposed implementation order
+
+1. Keep the selected defaults: in-person QR/fingerprint verification, one-to-one secure text first, and receipts meaning “authenticated and stored by the recipient app.”
+2. Finish the protocol/library compatibility and licence review; record the selected protocol and limitations.
 3. Add versioned message-envelope and key-storage interfaces; keep the current plaintext mode visibly labelled as a development-only legacy mode.
-4. Implement direct one-to-one protected messages and signed/authenticated receipts, then test malformed, modified, wrong-key, and replay cases.
+4. Implement direct one-to-one protected messages and authenticated receipts, then test malformed, modified, wrong-key, and replay cases.
 5. Add persistent replay history and protect local history/relay state.
 6. Extend the selected design to SOS/group delivery only after key distribution and membership changes are defined.
 7. Expose only privacy-reviewed security-state events to the dashboard.

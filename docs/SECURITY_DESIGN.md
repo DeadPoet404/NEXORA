@@ -102,18 +102,20 @@ Before describing the secure mode as implemented, test that:
 
 A source-level review of candidate repositories on 2026-11-16 found:
 
-- [`dint-dev/cryptography`](https://github.com/dint-dev/cryptography) is Apache-2.0 licensed and its Dart package exposes primitives including X25519, Ed25519, AES-GCM, and HKDF. Its companion `cryptography_flutter` package uses platform APIs on Android. This is a plausible primitive provider, **not** a complete asynchronous messaging protocol; using it alone would leave us responsible for protocol composition, key lifecycle, and review.
-- [`signalapp/libsignal`](https://github.com/signalapp/libsignal) contains the Signal Protocol and Double Ratchet, with Rust implementations exposed through Java, Swift, and TypeScript APIs. Its repository is AGPL-3.0, and its README says use outside Signal is unsupported. Android/Kotlin integration may be possible, but it adds JNI/Rust integration and distribution/licence obligations; it is not a drop-in Flutter protocol package.
-- [`Nitish987/signal-protocol-dart-implementation`](https://github.com/Nitish987/signal-protocol-dart-implementation) describes itself as a Dart Signal implementation, but GitHub reports no repository licence and its latest repository update is 2024-12. Do not use it as a dependency without a licence and maintenance audit.
+- [`MixinNetwork/libsignal_protocol_dart`](https://github.com/MixinNetwork/libsignal_protocol_dart) is the strongest Flutter fit found so far. Its current repository declares version 0.8.2, Dart SDK `>=3.4.0`, a pure-Dart Signal Protocol implementation, and GPL-3.0 licensing. Its API includes session/prekey stores, fingerprint helpers, and group sender-key support; the README describes X3DH session setup and message encryption. The repository has 114 Dart source/test files and a scheduled CI run succeeded on 2026-10-19 for its current head. This is encouraging maintenance evidence, **not** an independent security audit or proof of interoperability with current official Signal clients. Its GPL-3.0 terms need review before distributing the combined HYBRID-01 app; non-commercial use does not remove licence obligations.
+- [`signalapp/libsignal`](https://github.com/signalapp/libsignal) is Signal's official protocol implementation and supports Double Ratchet, but is Rust-backed with Java/Swift/TypeScript APIs. Its repository is AGPL-3.0 and says use outside Signal is unsupported. Android/Kotlin integration is possible in principle, but adds JNI/Rust integration and separate licence/support concerns; it is not a drop-in Flutter protocol package.
+- [`dint-dev/cryptography`](https://github.com/dint-dev/cryptography) is Apache-2.0 licensed and exposes primitives including X25519, Ed25519, AES-GCM, and HKDF; its companion `cryptography_flutter` package uses platform APIs on Android. It is a primitive provider, **not** a complete asynchronous messaging protocol. Using it alone would leave us responsible for protocol composition, key lifecycle, and review.
+- [`Yummo8/signal-protocol-flutter`](https://github.com/Yummo8/signal-protocol-flutter) is an older fork of the Dart implementation, last updated in 2023. Do not use that fork instead of its more recently maintained upstream.
 
-**Recommendation:** do not compose a home-grown protocol from primitives just to move quickly, and do not adopt an unlicensed clone. Before implementation, do a focused compatibility/licence review of using official libsignal through a small Android platform-channel layer versus finding another maintained, licensed implementation. If neither is suitable, keep the demo explicitly plaintext rather than claiming encryption.
+**Recommendation:** run a bounded integration feasibility spike with `MixinNetwork/libsignal_protocol_dart` first, since it most closely fits Flutter and the offline one-to-one use case. Before adopting it, confirm GPL-3.0 compatibility with the LinkMesh owner's permission and intended APK/source distribution, inspect its cryptographic implementation/dependencies more deeply, and test its session/prekey stores across restart. If the licence or review fails, do not replace it with hand-composed primitives; keep the app explicitly plaintext while evaluating a supported alternative.
 
 ## 11. Proposed implementation order
 
 1. Keep the selected defaults: in-person QR/fingerprint verification, one-to-one secure text first, and receipts meaning “authenticated and stored by the recipient app.”
-2. Finish the protocol/library compatibility and licence review; record the selected protocol and limitations.
-3. Add versioned message-envelope and key-storage interfaces; keep the current plaintext mode visibly labelled as a development-only legacy mode.
-4. Implement direct one-to-one protected messages and authenticated receipts, then test malformed, modified, wrong-key, and replay cases.
-5. Add persistent replay history and protect local history/relay state.
-6. Extend the selected design to SOS/group delivery only after key distribution and membership changes are defined.
-7. Expose only privacy-reviewed security-state events to the dashboard.
+2. Prototype the candidate library in an isolated test harness: identity fingerprint comparison, prekey bundle exchange without a server, encrypt/decrypt across offline endpoints, authenticated reverse-direction receipt, and session-state persistence.
+3. Verify key storage and GPL-3.0 distribution compatibility before integrating it into the app.
+4. If the spike passes, add versioned message-envelope and persistent key/session/prekey store adapters; keep the current plaintext mode visibly labelled as development-only.
+5. Test tampered, wrong-key, untrusted identity, replay, and restart cases before a security claim.
+6. Add persistent replay history and protect local history/relay state.
+7. Extend the selected design to SOS/group delivery only after key distribution and membership changes are defined.
+8. Expose only privacy-reviewed security-state events to the dashboard.

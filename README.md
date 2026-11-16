@@ -10,7 +10,7 @@ An experimental, non-commercial showcase of offline messaging over Bluetooth Low
 - Android application and native foreground-service integration.
 - Unit tests for routing through an in-memory simulated network.
 
-This checkout intentionally omits LinkMesh's iOS/macOS projects and web preview. The relay queue is designed to be stored in SQLite and restored when the router starts; the automated restart test reuses an in-memory store, so it validates router recovery but not process-death durability of the SQLite adapter. Physical app-restart recovery and BLE relay still need device verification. The current protocol does not provide end-to-end encryption or authenticated receipts.
+This checkout intentionally omits LinkMesh's iOS/macOS projects and web preview. The relay queue is designed to be stored in SQLite and restored when the router starts; the automated restart test reuses an in-memory store, so it validates router recovery but not process-death durability of the SQLite adapter. Physical app-restart recovery and BLE relay still need device verification. The current protocol does not provide end-to-end encryption or authenticated receipts; see the [security design proposal](docs/SECURITY_DESIGN.md) for the planned threat model and acceptance checks.
 
 ## Android setup
 

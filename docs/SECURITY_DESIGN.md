@@ -119,3 +119,9 @@ A source-level review of candidate repositories on 2026-11-16 found:
 6. Add persistent replay history and protect local history/relay state.
 7. Extend the selected design to SOS/group delivery only after key distribution and membership changes are defined.
 8. Expose only privacy-reviewed security-state events to the dashboard.
+
+## 12. Isolated candidate-spike status (2026-11-16)
+
+An isolated Dart test package is committed at [`tool/signal_protocol_spike`](../tool/signal_protocol_spike), pinned to `MixinNetwork/libsignal_protocol_dart` revision `9c871c05629e60f23fed6e7cec863c8aaff696d9`. Its tests cover reciprocal QR fingerprint matching and key substitution, offline prekey setup and delayed ciphertext relay, tampering and replay rejection, a reverse-direction encrypted receipt, prekey/session/identity reload after reopening serialized stores, and rejection of a prekey bundle that conflicts with a pinned identity. The test-only JSON store writes key material without encryption and is not suitable for product use. The package README has commands for macOS/Linux/Git Bash and Windows PowerShell.
+
+**Execution result: not run.** This workspace has neither `dart` nor `flutter` on PATH (`dart --version` returned `command not found`), so dependency resolution, formatting, analysis, and tests have not executed. There are no passing or failing test results to claim. The spike remains incomplete until run with Dart SDK >= 3.4, including review and resolution of any compile/runtime failures. Even a passing result would demonstrate only feasibility in this harness, not independent cryptographic assurance, official Signal interoperability, production-grade Android storage, or approval to adopt the GPL-3.0 dependency.

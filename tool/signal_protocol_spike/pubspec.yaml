@@ -1,0 +1,16 @@
+name: hybrid01_signal_spike
+description: Isolated, non-production feasibility tests for libsignal_protocol_dart.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  libsignal_protocol_dart:
+    git:
+      url: https://github.com/MixinNetwork/libsignal_protocol_dart.git
+      ref: 9c871c05629e60f23fed6e7cec863c8aaff696d9
+
+dev_dependencies:
+  test: ^1.25.8

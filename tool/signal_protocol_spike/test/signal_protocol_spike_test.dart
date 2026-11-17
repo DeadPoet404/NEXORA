@@ -80,12 +80,21 @@ void main() {
       isNot(contains(body)),
     );
 
-    // The relay receives/forwards bytes only; its separate store has no session.
+    // Model a relay with an unrelated decoy signed-prekey record under the
+    // advertised ID, but without Charlie's one-time prekey or session. This
+    // avoids triggering the candidate's unawaited missing-signed-prekey error
+    // while still proving the relay cannot decrypt the one-time-prekey packet.
+    final decoySignedPreKey =
+        generateSignedPreKey(relay.identityKeyPair, charlie.signedPreKey!.id);
+    await relay.store.storeSignedPreKey(
+      decoySignedPreKey.id,
+      decoySignedPreKey,
+    );
     final relayedBytes = Uint8List.fromList(serialized);
     final relayCipher = SessionCipher.fromStore(relay.store, alice.address);
     await expectLater(
       relayCipher.decrypt(PreKeySignalMessage(relayedBytes)),
-      throwsA(anything),
+      throwsA(isA<InvalidKeyIdException>()),
     );
 
     // Attempt tampering against a fresh recipient store so failure cannot
@@ -100,13 +109,21 @@ void main() {
       charlie.signedPreKey!,
     );
     await tamperStore.saveIdentity(alice.address, alice.publicIdentity);
-    final modified = Uint8List.fromList(serialized);
-    modified[modified.length - 1] ^= 1;
+    final parsedPacket = PreKeySignalMessage(serialized);
+    final modifiedSignal = parsedPacket.getWhisperMessage().serialize();
+    modifiedSignal[modifiedSignal.length - 1] ^= 1;
+    final tamperedPacket = PreKeySignalMessage.from(
+      parsedPacket.getMessageVersion(),
+      parsedPacket.getRegistrationId(),
+      parsedPacket.getPreKeyId(),
+      parsedPacket.getSignedPreKeyId(),
+      parsedPacket.getBaseKey(),
+      parsedPacket.getIdentityKey(),
+      SignalMessage.fromSerialized(modifiedSignal),
+    );
     final tamperCipher = SessionCipher.fromStore(tamperStore, alice.address);
     await expectLater(
-      Future<Uint8List>.sync(
-        () => tamperCipher.decrypt(PreKeySignalMessage(modified)),
-      ),
+      Future<Uint8List>.sync(() => tamperCipher.decrypt(tamperedPacket)),
       throwsA(anything),
     );
 

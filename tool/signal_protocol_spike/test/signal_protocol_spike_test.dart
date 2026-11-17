@@ -97,7 +97,12 @@ void main() {
       Future<Uint8List>.sync(
         () => relayCipher.decrypt(PreKeySignalMessage(relayedBytes)),
       ),
-      throwsA(isA<InvalidMessageException>()),
+      throwsA(
+        predicate(
+          (error) =>
+              error is Exception && error.toString().contains('Bad Mac!'),
+        ),
+      ),
     );
 
     // Attempt tampering against a fresh recipient store so failure cannot

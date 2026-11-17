@@ -14,8 +14,8 @@ class MeshPermissions {
 
   /// Whether the mesh can run with no UI to ask for anything. On Android 11
   /// and below scanning also needs location.
-  bool canRunHeadless(int sdkInt) =>
-      bluetooth && (!Platform.isAndroid || sdkInt >= 31 || location);
+  bool canRunHeadless(int sdkInt, {bool? isAndroid}) =>
+      bluetooth && (!(isAndroid ?? Platform.isAndroid) || sdkInt >= 31 || location);
 }
 
 const _bluetooth = [

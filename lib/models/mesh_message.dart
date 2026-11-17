@@ -105,10 +105,28 @@ class MeshMessage {
   /// Returns null for anything that isn't a well-formed message, so a
   /// misbehaving peer can't crash the router.
   static MeshMessage? tryDecode(Uint8List bytes) {
+    if (bytes.isEmpty || bytes.length > MeshConstants.maxFrameBytes) return null;
     try {
       final json = jsonDecode(utf8.decode(bytes));
       if (json is! Map<String, Object?>) return null;
-      return MeshMessage.fromJson(json);
+      final message = MeshMessage.fromJson(json);
+      if (message.id.isEmpty || message.id.length > 128 ||
+          message.senderId.isEmpty || message.senderId.length > 128 ||
+          message.receiverId.isEmpty || message.receiverId.length > 128 ||
+          message.senderName.length > 128 ||
+          utf8.encode(message.content).length > MeshConstants.maxContentBytes ||
+          message.hopCount < 0 ||
+          message.maxHops < 1 ||
+          message.maxHops > 16 ||
+          message.hopCount > message.maxHops ||
+          (message.type == MessageType.ack && message.refId == null) ||
+          (message.refId?.length ?? 0) > 128 ||
+          ((message.lat == null) != (message.lng == null)) ||
+          (message.lat != null && (message.lat! < -90 || message.lat! > 90)) ||
+          (message.lng != null && (message.lng! < -180 || message.lng! > 180))) {
+        return null;
+      }
+      return message;
     } catch (_) {
       return null;
     }

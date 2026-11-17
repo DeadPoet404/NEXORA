@@ -2,7 +2,15 @@ import 'dart:typed_data';
 
 import '../models/peer.dart';
 
-enum TransportStatus { idle, bluetoothOff, unsupported, running }
+enum TransportStatus {
+  idle,
+  bluetoothOff,
+  unsupported,
+  permissionDenied,
+  scanFailed,
+  receiveUnavailable,
+  running,
+}
 
 /// A link layer that moves opaque frames between neighbouring nodes.
 ///
@@ -23,13 +31,18 @@ abstract class MeshTransport {
   Stream<String> get peerLinked;
 
   Future<void> start();
+  Future<void> retryDiscovery();
   Future<void> stop();
 
   /// Switches to a low-power mode while the app isn't on screen.
   void setBackground(bool background);
 
-  /// Sends [frame] to every linked neighbour. Returns how many accepted it.
-  Future<int> broadcast(Uint8List frame);
+  /// Sends [frame] to linked neighbours except explicitly blocked node IDs.
+  /// Returns how many accepted it.
+  Future<int> broadcast(
+    Uint8List frame, {
+    Set<String> excludeNodeIds = const {},
+  });
 
   /// Sends [frame] to one neighbour. Returns false if it isn't linked or the
   /// write failed.

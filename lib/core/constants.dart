@@ -21,6 +21,10 @@ class MeshConstants {
   static const seenTtl = Duration(hours: 1);
   static const seenMaxEntries = 5000;
 
+  /// BLE chunk framing caps a frame near 3.5 KB at the minimum supported MTU.
+  static const maxFrameBytes = 3400;
+  static const maxContentBytes = 2400;
+
   static const sosInterval = Duration(seconds: 20);
 }
 
@@ -55,4 +59,5 @@ class BleConstants {
   static const reconnectBackoff = Duration(seconds: 15);
 
   static const requestedMtu = 512;
+  static const maxKnownPeers = 500;
 }

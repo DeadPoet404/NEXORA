@@ -16,6 +16,7 @@ class DeliveryStatusIcon extends StatelessWidget {
       DeliveryStatus.sent => (Icons.check, 'Sent'),
       DeliveryStatus.relayed => (Icons.swap_horiz, 'Relayed'),
       DeliveryStatus.delivered => (Icons.done_all, 'Delivered'),
+      DeliveryStatus.expired => (Icons.error_outline, 'Not delivered · retry window expired'),
     };
     return Tooltip(
       message: label,

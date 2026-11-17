@@ -6,26 +6,28 @@ enum PeerTrustStatus { unverified, verified, identityChanged, blocked }
 class PeerTrustRecord {
   PeerTrustRecord({
     required this.peerId,
-    required this.observedKeyId,
-    required this.observedAlgorithm,
-    required this.observedFingerprint,
-    required List<int> observedPublicKey,
+    this.observedKeyId,
+    this.observedAlgorithm,
+    this.observedFingerprint,
+    List<int>? observedPublicKey,
     required this.status,
     required this.updatedAtMillis,
     this.pinnedKeyId,
     this.pinnedAlgorithm,
     this.pinnedFingerprint,
     List<int>? pinnedPublicKey,
-  })  : observedPublicKey = List<int>.unmodifiable(observedPublicKey),
+  })  : observedPublicKey = observedPublicKey == null
+            ? null
+            : List<int>.unmodifiable(observedPublicKey),
         pinnedPublicKey = pinnedPublicKey == null
             ? null
             : List<int>.unmodifiable(pinnedPublicKey);
 
   final String peerId;
-  final String observedKeyId;
-  final String observedAlgorithm;
-  final String observedFingerprint;
-  final List<int> observedPublicKey;
+  final String? observedKeyId;
+  final String? observedAlgorithm;
+  final String? observedFingerprint;
+  final List<int>? observedPublicKey;
   final String? pinnedKeyId;
   final String? pinnedAlgorithm;
   final String? pinnedFingerprint;
@@ -50,6 +52,8 @@ class PeerTrustRecord {
 /// [confirmQrIdentity] must be atomic: it either pins the exact scanned key and
 /// marks it verified, or leaves the previous trust record unchanged.
 abstract interface class PeerTrustRepository {
+  Stream<void> get trustChanges;
+
   Future<PeerTrustRecord?> getPeerTrust(String peerId);
 
   /// Record a key observed from a peer; this never marks it verified.
@@ -162,25 +166,31 @@ class PeerTrustTransitions {
   }
 
   static PeerTrustRecord block(
-    PeerTrustRecord previous, {
+    PeerTrustRecord? previous, {
+    required String peerId,
     required int nowMillis,
   }) =>
       PeerTrustRecord(
-        peerId: previous.peerId,
-        observedKeyId: previous.observedKeyId,
-        observedAlgorithm: previous.observedAlgorithm,
-        observedFingerprint: previous.observedFingerprint,
-        observedPublicKey: previous.observedPublicKey,
-        pinnedKeyId: previous.pinnedKeyId,
-        pinnedAlgorithm: previous.pinnedAlgorithm,
-        pinnedFingerprint: previous.pinnedFingerprint,
-        pinnedPublicKey: previous.pinnedPublicKey,
+        peerId: peerId,
+        observedKeyId: previous?.observedKeyId,
+        observedAlgorithm: previous?.observedAlgorithm,
+        observedFingerprint: previous?.observedFingerprint,
+        observedPublicKey: previous?.observedPublicKey,
+        pinnedKeyId: previous?.pinnedKeyId,
+        pinnedAlgorithm: previous?.pinnedAlgorithm,
+        pinnedFingerprint: previous?.pinnedFingerprint,
+        pinnedPublicKey: previous?.pinnedPublicKey,
         status: PeerTrustStatus.blocked,
         updatedAtMillis: nowMillis,
       );
 }
 
-class PeerTrustService {
+abstract interface class PeerMessagingPolicy {
+  Stream<void> get trustChanges;
+  Future<bool> isMessagingRestricted(String peerId);
+}
+
+class PeerTrustService implements PeerMessagingPolicy {
   PeerTrustService({
     required this.repository,
     DateTime Function()? clock,
@@ -188,6 +198,28 @@ class PeerTrustService {
 
   final PeerTrustRepository repository;
   final DateTime Function() _clock;
+
+  @override
+  Stream<void> get trustChanges => repository.trustChanges;
+
+  @override
+  Future<bool> isMessagingRestricted(String peerId) async {
+    final status = (await repository.getPeerTrust(peerId))?.status;
+    return status == PeerTrustStatus.blocked ||
+        status == PeerTrustStatus.identityChanged;
+  }
+
+  Future<void> requireMessagingAllowed(String peerId) async {
+    final record = await repository.getPeerTrust(peerId);
+    if (record?.status == PeerTrustStatus.blocked) {
+      throw const PeerTrustException('Messaging is blocked for this peer');
+    }
+    if (record?.status == PeerTrustStatus.identityChanged) {
+      throw const PeerTrustException(
+        'Messaging is restricted because this peer identity changed',
+      );
+    }
+  }
 
   Future<PeerTrustRecord> observe(PublicIdentityMaterial identity) =>
       repository.observePeerIdentity(

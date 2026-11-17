@@ -60,6 +60,17 @@ void main() {
       expect(verified.pinnedFingerprint, identity().fingerprint);
     });
 
+    test('QR verification is linked to the discovered mesh peer ID', () async {
+      final challenge = await service.prepareVerification(
+        expectedPeerId: 'peer-1',
+        scannedQr: IdentityQrPayload.fromIdentity(identity()).encode(),
+      );
+      expect((await repository.getPeerTrust('peer-1')), isNull);
+      final pinned = await service.confirmVerification(challenge);
+      expect(pinned.peerId, 'peer-1');
+      expect(pinned.status, PeerTrustStatus.verified);
+    });
+
     test('different observed key is identity-changed and QR cannot reset it', () async {
       await service.observe(identity());
       final first = await service.prepareVerification(
@@ -69,6 +80,7 @@ void main() {
       await service.confirmVerification(first);
       final changed = await service.observe(identity(key: 'key-B'));
       expect(changed.status, PeerTrustStatus.identityChanged);
+      expect(await service.isMessagingRestricted('peer-1'), isTrue);
       expect((await service.observe(identity())).status,
           PeerTrustStatus.identityChanged);
       await expectLater(
@@ -90,6 +102,14 @@ void main() {
         ),
         throwsA(isA<PeerTrustException>()),
       );
+    });
+
+    test('an unobserved discovered peer can be blocked without fake key data',
+        () async {
+      final blocked = await repository.blockPeer('peer-1', nowMillis: 100);
+      expect(blocked.status, PeerTrustStatus.blocked);
+      expect(blocked.observedPublicKey, isNull);
+      expect(await service.isMessagingRestricted('peer-1'), isTrue);
     });
 
     test('blocking persists and prevents QR verification', () async {

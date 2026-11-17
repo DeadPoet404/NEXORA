@@ -7,10 +7,12 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart'
     hide CharacteristicProperties;
 
 import '../core/constants.dart';
+import '../data/peer_registry.dart';
 import '../mesh/chunker.dart';
 import '../mesh/transport.dart';
 import '../models/node_identity.dart';
 import '../models/peer.dart';
+import '../security/peer_trust.dart';
 
 /// BLE link layer. Every node plays both roles at once:
 ///
@@ -23,8 +25,11 @@ import '../models/peer.dart';
 /// So each direction of a link is a separate GATT connection: A sends to B
 /// over A's connection to B. Frames larger than the MTU are chunked.
 class BleTransport implements MeshTransport {
-  BleTransport({required NodeIdentity Function() identity})
-      : _identity = identity; // ignore: prefer_initializing_formals
+  BleTransport({
+    required NodeIdentity Function() identity,
+    required this.peerRegistry,
+    required this.messagingPolicy,
+  }) : _identity = identity; // ignore: prefer_initializing_formals
 
   /// flutter_blue_plus requires a license declaration. `nonprofit` covers
   /// personal, nonprofit and educational use; for-profit use needs a paid
@@ -32,6 +37,8 @@ class BleTransport implements MeshTransport {
   static const fbpLicense = License.nonprofit;
 
   final NodeIdentity Function() _identity;
+  final PeerRegistry peerRegistry;
+  final PeerMessagingPolicy messagingPolicy;
   final _service = Guid(BleConstants.serviceUuid);
   final _inboxUuid = Guid(BleConstants.inboxCharUuid);
   final _identityUuid = Guid(BleConstants.identityCharUuid);
@@ -46,11 +53,13 @@ class BleTransport implements MeshTransport {
 
   TransportStatus _status = TransportStatus.idle;
   StreamSubscription<BluetoothAdapterState>? _adapterSub;
+  StreamSubscription<void>? _trustSub;
   StreamSubscription<List<ScanResult>>? _scanSub;
   Timer? _scanTimer;
   Timer? _maintenanceTimer;
   bool _peripheralInitialized = false;
   bool _serviceAdded = false;
+  String? _peripheralError;
   var _peripheralPoweredOn = Completer<void>();
   bool _online = false;
   bool _background = false;
@@ -71,52 +80,68 @@ class BleTransport implements MeshTransport {
   Stream<String> get peerLinked => _linkedCtrl.stream;
 
   @override
-  List<Peer> get peers {
-    final seen = <String>{};
-    final result = <Peer>[];
-    final ordered = _links.values.where((l) => !l.ignored).toList()
-      ..sort((a, b) {
-        final byState = _rank(a.state).compareTo(_rank(b.state));
-        return byState != 0 ? byState : b.rssi.compareTo(a.rssi);
-      });
-    for (final link in ordered) {
-      // A peer may show up under several addresses (MAC rotation); keep the
-      // best-ranked one per node id.
-      final nodeId = link.nodeId;
-      if (nodeId != null && !seen.add(nodeId)) continue;
-      result.add(link.toPeer());
-    }
-    return result;
-  }
-
-  static int _rank(PeerLinkState s) => switch (s) {
-        PeerLinkState.connected => 0,
-        PeerLinkState.connecting => 1,
-        PeerLinkState.discovered => 2,
-        PeerLinkState.disconnected => 3,
-      };
+  List<Peer> get peers => mergePeerViews(
+        remembered: const [],
+        live: _links.values
+            .where((link) => !link.ignored)
+            .map((link) => link.toPeer()),
+      );
 
   @override
   Future<void> start() async {
     if (_adapterSub != null) return;
-    if (!await FlutterBluePlus.isSupported) {
-      _setStatus(TransportStatus.unsupported);
+    _trustSub ??= messagingPolicy.trustChanges.listen((_) {
+      unawaited(_disconnectRestrictedLinks());
+    });
+    try {
+      if (!await FlutterBluePlus.isSupported) {
+        _setStatus(TransportStatus.unsupported);
+        return;
+      }
+    } catch (error) {
+      _setStatus(_isPermissionError(error)
+          ? TransportStatus.permissionDenied
+          : TransportStatus.unsupported);
       return;
     }
-    _adapterSub = FlutterBluePlus.adapterState.listen((state) {
-      if (state == BluetoothAdapterState.on) {
-        _goOnline();
-      } else if (state == BluetoothAdapterState.off) {
-        _goOffline();
-        _setStatus(TransportStatus.bluetoothOff);
-      }
-    });
+    _adapterSub = FlutterBluePlus.adapterState.listen(
+      (state) {
+        if (state == BluetoothAdapterState.on) {
+          unawaited(_goOnline());
+        } else if (state == BluetoothAdapterState.off) {
+          unawaited(_goOffline());
+          _setStatus(TransportStatus.bluetoothOff);
+        } else if (state.name == 'unauthorized') {
+          unawaited(_goOffline());
+          _setStatus(TransportStatus.permissionDenied);
+        } else if (state.name == 'unavailable') {
+          unawaited(_goOffline());
+          _setStatus(TransportStatus.unsupported);
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        _setStatus(_isPermissionError(error)
+            ? TransportStatus.permissionDenied
+            : TransportStatus.scanFailed);
+      },
+    );
+  }
+
+  @override
+  Future<void> retryDiscovery() async {
+    if (!_online) {
+      await start();
+      return;
+    }
+    await _restartScan();
   }
 
   @override
   Future<void> stop() async {
     await _adapterSub?.cancel();
     _adapterSub = null;
+    await _trustSub?.cancel();
+    _trustSub = null;
     await _goOffline();
     _setStatus(TransportStatus.idle);
   }
@@ -124,18 +149,30 @@ class BleTransport implements MeshTransport {
   Future<void> _goOnline() async {
     if (_online) return;
     _online = true;
+    _peripheralError = null;
     try {
       await _startPeripheral();
     } catch (e) {
       // Some phones can't advertise. We can still send, but nobody can
       // write to us, so this node is send-only.
+      _peripheralError = e.toString();
       debugPrint('LinkMesh: peripheral role unavailable: $e');
     }
-    _scanSub = FlutterBluePlus.onScanResults.listen(_onScanResults);
+    if (!_online) return;
+    _scanSub = FlutterBluePlus.onScanResults.listen(
+      _onScanResults,
+      onError: (Object error, StackTrace stackTrace) {
+        _setStatus(_isPermissionError(error)
+            ? TransportStatus.permissionDenied
+            : TransportStatus.scanFailed);
+      },
+    );
     _scheduleScanning();
     _maintenanceTimer =
         Timer.periodic(const Duration(seconds: 5), (_) => _maintain());
-    _setStatus(TransportStatus.running);
+    _setStatus(_peripheralError == null
+        ? TransportStatus.running
+        : TransportStatus.receiveUnavailable);
   }
 
   Future<void> _goOffline() async {
@@ -311,11 +348,26 @@ class BleTransport implements MeshTransport {
           withServices: [_service],
           timeout: BleConstants.scanWindow,
           androidScanMode: AndroidScanMode.lowLatency,
+          continuousUpdates: true,
         );
+      }
+      if (_status == TransportStatus.permissionDenied ||
+          _status == TransportStatus.scanFailed) {
+        _setStatus(_peripheralError == null
+            ? TransportStatus.running
+            : TransportStatus.receiveUnavailable);
       }
     } catch (e) {
       debugPrint('LinkMesh: scan failed: $e');
+      _setStatus(_isPermissionError(e)
+          ? TransportStatus.permissionDenied
+          : TransportStatus.scanFailed);
     }
+  }
+
+  bool _isPermissionError(Object error) {
+    final text = error.toString().toLowerCase();
+    return text.contains('permission') || text.contains('unauthoriz');
   }
 
 
@@ -330,13 +382,18 @@ class BleTransport implements MeshTransport {
       link
         ..rssi = r.rssi
         ..lastSeen = now;
+      if (link.nodeId != null &&
+          now.difference(link.lastRegistryWrite) >=
+              const Duration(minutes: 1)) {
+        unawaited(_rememberPeer(link));
+      }
       unawaited(_maybeConnect(link));
     }
     _emitPeers();
   }
 
   Future<void> _maybeConnect(_Link link) async {
-    if (!_online || link.ignored) return;
+    if (!_online || link.ignored || link.messagingRestricted) return;
     if (link.state == PeerLinkState.connected ||
         link.state == PeerLinkState.connecting) {
       return;
@@ -349,7 +406,23 @@ class BleTransport implements MeshTransport {
     if (active.length >= BleConstants.maxOutboundLinks) return;
 
     // Claim the slot synchronously so concurrent scan callbacks don't race.
-    link.state = PeerLinkState.connecting;
+    link
+      ..state = PeerLinkState.connecting
+      ..connectionError = null
+      ..sawConnectedState = false
+      ..droppedDuringConnect = false;
+    link.connectionSub ??= link.device.connectionState.listen((state) {
+      if (state == BluetoothConnectionState.connected) {
+        link.sawConnectedState = true;
+      } else if (state == BluetoothConnectionState.disconnected &&
+          link.sawConnectedState) {
+        if (link.state == PeerLinkState.connected) {
+          _onDisconnected(link);
+        } else if (link.state == PeerLinkState.connecting) {
+          link.droppedDuringConnect = true;
+        }
+      }
+    });
     _emitPeers();
     try {
       await link.device.connect(
@@ -370,6 +443,28 @@ class BleTransport implements MeshTransport {
       }
       final identity = NodeIdentity.tryDecode(await identityChar.read());
       if (identity == null) throw StateError('Unreadable identity');
+      if (link.droppedDuringConnect) {
+        throw StateError('BLE link disconnected during service discovery');
+      }
+      if (!_online || !identical(_links[link.device.remoteId.str], link)) {
+        await link.device.disconnect();
+        return;
+      }
+      if (await messagingPolicy.isMessagingRestricted(identity.id)) {
+        await link.device.disconnect();
+        await link.connectionSub?.cancel();
+        link
+          ..connectionSub = null
+          ..nodeId = identity.id
+          ..name = identity.name
+          ..inbox = null
+          ..state = PeerLinkState.disconnected
+          ..messagingRestricted = true
+          ..connectionError = 'Blocked or changed identity; messaging restricted'
+          ..nextAttempt = DateTime.now().add(BleConstants.peerStaleAfter);
+        _emitPeers();
+        return;
+      }
 
       final isSelf = identity.id == _identity().id;
       final isDuplicate = _links.values.any((l) =>
@@ -378,11 +473,16 @@ class BleTransport implements MeshTransport {
           l.state == PeerLinkState.connected);
       if (isSelf || isDuplicate) {
         await link.device.disconnect();
+        await link.connectionSub?.cancel();
         link
+          ..connectionSub = null
           ..ignored = isSelf
           ..nodeId = identity.id
+          ..name = identity.name
           ..state = PeerLinkState.disconnected
-          // A duplicate address may become the live one if the other drops.
+          ..connectionError = null
+          // An alias may become the live connection as soon as the canonical
+          // address disconnects; _onDisconnected will expedite its retry.
           ..nextAttempt = DateTime.now().add(BleConstants.peerStaleAfter);
         _emitPeers();
         return;
@@ -392,17 +492,19 @@ class BleTransport implements MeshTransport {
         ..nodeId = identity.id
         ..name = identity.name
         ..inbox = inbox
-        ..state = PeerLinkState.connected;
-      link.connectionSub = link.device.connectionState.listen((s) {
-        if (s == BluetoothConnectionState.disconnected) _onDisconnected(link);
-      });
+        ..state = PeerLinkState.connected
+        ..connectionError = null;
+      unawaited(_rememberPeer(link));
       _emitPeers();
       _linkedCtrl.add(identity.id);
     } catch (e) {
       debugPrint('LinkMesh: connect to ${link.device.remoteId} failed: $e');
+      await link.connectionSub?.cancel();
       link
+        ..connectionSub = null
         ..state = PeerLinkState.disconnected
         ..inbox = null
+        ..connectionError = _displayConnectionError(e)
         ..nextAttempt = DateTime.now().add(BleConstants.reconnectBackoff);
       try {
         await link.device.disconnect();
@@ -412,14 +514,83 @@ class BleTransport implements MeshTransport {
   }
 
   void _onDisconnected(_Link link) {
-    link.connectionSub?.cancel();
+    unawaited(link.connectionSub?.cancel());
+    final retryAt = DateTime.now().add(const Duration(seconds: 3));
     link
       ..connectionSub = null
       ..inbox = null
       ..state = PeerLinkState.disconnected
-      // Brief pause, then let the next scan reconnect if it's still around.
-      ..nextAttempt = DateTime.now().add(const Duration(seconds: 3));
+      ..connectionError = 'Connection interrupted; retrying nearby scan'
+      ..nextAttempt = retryAt;
+    final peerId = link.nodeId;
+    if (peerId != null) {
+      for (final alias in _links.values.where((other) =>
+          other != link &&
+          other.nodeId == peerId &&
+          other.state == PeerLinkState.disconnected)) {
+        alias.nextAttempt = DateTime.now();
+      }
+    }
     _emitPeers();
+  }
+
+  Future<void> _rememberPeer(_Link link) async {
+    final peerId = link.nodeId;
+    if (peerId == null) return;
+    link.lastRegistryWrite = DateTime.now();
+    try {
+      await peerRegistry.rememberPeer(
+        peerId: peerId,
+        displayName: link.name ?? '',
+        lastSeenMillis: link.lastSeen.millisecondsSinceEpoch,
+      );
+    } catch (error) {
+      link.connectionError = 'Peer details could not be saved: $error';
+      _emitPeers();
+    }
+  }
+
+  String _displayConnectionError(Object error) {
+    final text = error.toString();
+    return text.length <= 160 ? text : '${text.substring(0, 157)}…';
+  }
+
+  Future<void> _disconnectRestrictedLinks() async {
+    if (!_online) return;
+    var changed = false;
+    for (final link in _links.values.toList()) {
+      final peerId = link.nodeId;
+      if (peerId == null) continue;
+      final restricted = await messagingPolicy.isMessagingRestricted(peerId);
+      if (!restricted) {
+        if (link.messagingRestricted) {
+          link
+            ..messagingRestricted = false
+            ..connectionError = null
+            ..nextAttempt = DateTime.now();
+          changed = true;
+        }
+        continue;
+      }
+      if (link.messagingRestricted &&
+          link.state != PeerLinkState.connected &&
+          link.state != PeerLinkState.connecting) {
+        continue;
+      }
+      link
+        ..messagingRestricted = true
+        ..inbox = null
+        ..state = PeerLinkState.disconnected
+        ..connectionError = 'Blocked or changed identity; messaging restricted'
+        ..nextAttempt = DateTime.now().add(BleConstants.peerStaleAfter);
+      await link.connectionSub?.cancel();
+      link.connectionSub = null;
+      try {
+        await link.device.disconnect();
+      } catch (_) {}
+      changed = true;
+    }
+    if (changed) _emitPeers();
   }
 
   Future<void> _maintain() async {
@@ -443,16 +614,33 @@ class BleTransport implements MeshTransport {
   // Sending
 
   @override
-  Future<int> broadcast(Uint8List frame) async {
-    final targets = _links.values.where((l) => l.inbox != null).toList();
+  Future<int> broadcast(
+    Uint8List frame, {
+    Set<String> excludeNodeIds = const {},
+  }) async {
+    final targets = <_Link>[];
+    for (final link in _links.values) {
+      final peerId = link.nodeId;
+      if (link.inbox == null ||
+          peerId == null ||
+          excludeNodeIds.contains(peerId) ||
+          await messagingPolicy.isMessagingRestricted(peerId)) {
+        continue;
+      }
+      targets.add(link);
+    }
     final results = await Future.wait(targets.map((l) => _write(l, frame)));
     return results.where((ok) => ok).length;
   }
 
   @override
   Future<bool> sendTo(String nodeId, Uint8List frame) async {
+    if (await messagingPolicy.isMessagingRestricted(nodeId)) return false;
     final link = _links.values
-        .where((l) => l.nodeId == nodeId && l.inbox != null)
+        .where((l) =>
+            l.nodeId == nodeId &&
+            l.inbox != null &&
+            l.state == PeerLinkState.connected)
         .firstOrNull;
     return link == null ? false : _write(link, frame);
   }
@@ -460,13 +648,24 @@ class BleTransport implements MeshTransport {
   /// Writes are queued per link so chunks of different frames never interleave.
   Future<bool> _write(_Link link, Uint8List frame) {
     final result = link.writeQueue.then((_) => _writeNow(link, frame));
-    link.writeQueue = result.then((_) {});
+    link.writeQueue = result.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('LinkMesh: queued BLE write failed: $error');
+      },
+    );
     return result;
   }
 
   Future<bool> _writeNow(_Link link, Uint8List frame) async {
     final inbox = link.inbox;
-    if (inbox == null) return false;
+    final peerId = link.nodeId;
+    if (inbox == null ||
+        peerId == null ||
+        link.state != PeerLinkState.connected ||
+        await messagingPolicy.isMessagingRestricted(peerId)) {
+      return false;
+    }
     try {
       final chunkSize = link.device.mtuNow - 3;
       for (final chunk in Chunker.split(frame, chunkSize)) {
@@ -495,7 +694,12 @@ class _Link {
   String? name;
   int rssi = -100;
   DateTime lastSeen = DateTime.now();
+  DateTime lastRegistryWrite = DateTime.fromMillisecondsSinceEpoch(0);
   PeerLinkState state = PeerLinkState.discovered;
+  String? connectionError;
+  bool messagingRestricted = false;
+  bool sawConnectedState = false;
+  bool droppedDuringConnect = false;
   DateTime nextAttempt = DateTime.fromMillisecondsSinceEpoch(0);
   BluetoothCharacteristic? inbox;
   StreamSubscription<BluetoothConnectionState>? connectionSub;
@@ -511,5 +715,6 @@ class _Link {
         state: state,
         rssi: rssi,
         lastSeen: lastSeen,
+        connectionError: connectionError,
       );
 }

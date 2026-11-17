@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
+import '../data/peer_registry.dart';
 import '../mesh/mesh_router.dart';
 import '../mesh/transport.dart';
 import '../models/node_identity.dart';
@@ -18,14 +21,18 @@ import '../services/sos_service.dart';
 final storeProvider = Provider<MessageStore>((_) => throw UnimplementedError());
 final peerTrustRepositoryProvider =
     Provider<PeerTrustRepository>((_) => throw UnimplementedError());
+final peerRegistryProvider =
+    Provider<PeerRegistry>((_) => throw UnimplementedError());
 final localIdentityProvider =
     Provider<LocalIdentityProvider>((_) => throw UnimplementedError());
 final peerTrustServiceProvider = Provider<PeerTrustService>(
   (ref) => PeerTrustService(repository: ref.watch(peerTrustRepositoryProvider)),
 );
 final peerTrustRecordProvider =
-    FutureProvider.family<PeerTrustRecord?, String>((ref, peerId) {
-  return ref.watch(peerTrustRepositoryProvider).getPeerTrust(peerId);
+    StreamProvider.family<PeerTrustRecord?, String>((ref, peerId) {
+  final repository = ref.watch(peerTrustRepositoryProvider);
+  final store = ref.watch(storeProvider);
+  return _watchPeerTrust(repository, store.changes, peerId);
 });
 final transportProvider =
     Provider<MeshTransport>((_) => throw UnimplementedError());
@@ -54,6 +61,50 @@ Stream<T> _watchStore<T>(MessageStore store, Future<T> Function() query) async* 
   }
 }
 
+Stream<PeerTrustRecord?> _watchPeerTrust(
+  PeerTrustRepository repository,
+  Stream<void> changes,
+  String peerId,
+) async* {
+  yield await repository.getPeerTrust(peerId);
+  await for (final _ in changes) {
+    yield await repository.getPeerTrust(peerId);
+  }
+}
+
+Stream<List<Peer>> _watchMergedPeers(
+  MeshTransport transport,
+  PeerRegistry registry,
+  Stream<void> storeChanges,
+) async* {
+  final updates = StreamController<List<Peer>>();
+  var livePeers = transport.peers;
+
+  Future<void> emit() async {
+    final remembered = await registry.knownPeers();
+    final peers = mergePeerViews(
+      remembered: remembered,
+      live: livePeers,
+    );
+    if (!updates.isClosed) updates.add(peers);
+  }
+
+  final peerSub = transport.peerChanges.listen((peers) {
+    livePeers = peers;
+    unawaited(emit());
+  }, onError: updates.addError);
+  final storeSub = storeChanges.listen((_) => unawaited(emit()),
+      onError: updates.addError);
+  try {
+    await emit();
+    yield* updates.stream;
+  } finally {
+    await peerSub.cancel();
+    await storeSub.cancel();
+    await updates.close();
+  }
+}
+
 final identityProvider = StreamProvider<NodeIdentity>((ref) {
   final service = ref.watch(identityServiceProvider);
   return _seeded(service.current, service.changes);
@@ -66,7 +117,9 @@ final transportStatusProvider = StreamProvider<TransportStatus>((ref) {
 
 final peersProvider = StreamProvider<List<Peer>>((ref) {
   final transport = ref.watch(transportProvider);
-  return _seeded(transport.peers, transport.peerChanges);
+  final registry = ref.watch(peerRegistryProvider);
+  final store = ref.watch(storeProvider);
+  return _watchMergedPeers(transport, registry, store.changes);
 });
 
 final conversationsProvider = StreamProvider<List<ConversationSummary>>((ref) {

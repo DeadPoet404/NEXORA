@@ -32,6 +32,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   StreamSubscription<StoredMessage>? _sosSub;
   late final AppLifecycleListener _lifecycle;
   MeshPermissions? _permissions;
+  String? _startError;
 
   @override
   void initState() {
@@ -53,10 +54,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   }
 
   Future<void> _startMesh() async {
-    final permissions =
-        await ref.read(meshControllerProvider).requestAndStart();
-    if (!mounted) return;
-    setState(() => _permissions = permissions);
+    try {
+      final permissions =
+          await ref.read(meshControllerProvider).requestAndStart();
+      if (!mounted) return;
+      setState(() {
+        _permissions = permissions;
+        _startError = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _startError = error.toString());
+    }
   }
 
   /// Opens the conversation (or SOS tab) for a tapped notification.
@@ -114,7 +123,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
           children: [
             const Text('LinkMesh'),
             Text(
-              '${connected.length} connected · ${peers.length} nearby',
+              '${connected.length} connected · ${peers.length} peers',
               style: Theme.of(context).textTheme.labelSmall,
             ),
           ],
@@ -140,7 +149,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
           controller: _tabs,
           tabs: [
             const Tab(text: 'Chats'),
-            Tab(text: 'Nearby (${peers.length})'),
+            Tab(text: 'Peers (${peers.length})'),
             Tab(
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -215,6 +224,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
   Widget? _banner(TransportStatus? status) {
     final permissions = _permissions;
+    if (_startError != null) {
+      return MaterialBanner(
+        content: Text('Could not start Bluetooth: $_startError'),
+        actions: [
+          TextButton(onPressed: _startMesh, child: const Text('Retry')),
+          TextButton(onPressed: openAppSettings, child: const Text('Settings')),
+        ],
+      );
+    }
     if (permissions != null && !permissions.bluetooth) {
       return MaterialBanner(
         content: const Text(
@@ -241,6 +259,28 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         ),
       TransportStatus.unsupported => const MaterialBanner(
           content: Text('This device does not support Bluetooth Low Energy.'),
+          actions: [SizedBox.shrink()],
+        ),
+      TransportStatus.permissionDenied => MaterialBanner(
+          content: const Text(
+            'Bluetooth permission was denied. Allow it to scan and connect.',
+          ),
+          actions: [
+            TextButton(onPressed: _startMesh, child: const Text('Retry')),
+            TextButton(onPressed: openAppSettings, child: const Text('Settings')),
+          ],
+        ),
+      TransportStatus.scanFailed => MaterialBanner(
+          content: const Text('Bluetooth scan failed. Nearby discovery may be stale.'),
+          actions: [
+            TextButton(onPressed: _startMesh, child: const Text('Retry')),
+          ],
+        ),
+      TransportStatus.receiveUnavailable => const MaterialBanner(
+          content: Text(
+            'Bluetooth advertising is unavailable. This device may send, '
+            'but nearby peers may not be able to connect back.',
+          ),
           actions: [SizedBox.shrink()],
         ),
       _ when permissions != null && !permissions.location => MaterialBanner(

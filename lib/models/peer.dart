@@ -2,7 +2,7 @@ import '../core/constants.dart';
 
 enum PeerLinkState { discovered, connecting, connected, disconnected }
 
-/// What the UI shows for a peer, per the spec's three connection states.
+/// BLE link state is independent from QR identity trust state.
 enum SignalQuality { connected, weak, disconnected }
 
 class Peer {
@@ -13,19 +13,27 @@ class Peer {
     required this.lastSeen,
     this.nodeId,
     this.name,
+    this.connectionError,
   });
 
-  /// Transport-level address (BLE MAC on Android).
+  /// Ephemeral transport locator (BLE address on Android); not a peer identity.
   final String address;
 
-  /// Mesh node id, known once the peer's identity has been read.
+  /// Persistent installation-scoped mesh node ID read from GATT. This is not
+  /// a cryptographic identity and must not be used as proof of authenticity.
   final String? nodeId;
   final String? name;
   final PeerLinkState state;
   final int rssi;
   final DateTime lastSeen;
+  final String? connectionError;
 
-  String get displayName => name ?? nodeId?.substring(0, 8) ?? address;
+  String get displayName {
+    final displayName = name;
+    if (displayName != null && displayName.isNotEmpty) return displayName;
+    if (nodeId == null) return address;
+    return nodeId!.length > 8 ? nodeId!.substring(0, 8) : nodeId!;
+  }
 
   SignalQuality get quality {
     if (state != PeerLinkState.connected) return SignalQuality.disconnected;

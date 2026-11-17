@@ -2,8 +2,11 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:linkmesh/core/constants.dart';
 import 'package:linkmesh/models/mesh_message.dart';
 import 'package:linkmesh/models/stored_message.dart';
+import 'package:linkmesh/security/peer_trust.dart';
+import 'package:linkmesh/security/public_identity.dart';
 
 import 'fake_network.dart';
 
@@ -107,6 +110,24 @@ void main() {
     expect((await statusOf(a, sent.id)).status, DeliveryStatus.delivered);
   });
 
+  test('a failed recipient store write can be retried without losing the frame',
+      () async {
+    final net = FakeNetwork();
+    final a = net.addNode('A');
+    final b = net.addNode('B', store: FailOnceIncomingStore());
+    net.link('A', 'B');
+
+    final sent = await a.router.sendText('B', 'retry after disk failure');
+    await settle();
+    expect(await b.store.conversation('A'), isEmpty);
+
+    await a.transport.broadcast(sent.message.encode());
+    await settle();
+    expect((await b.store.conversation('A')).single.message.content,
+        'retry after disk failure');
+    expect((await statusOf(a, sent.id)).status, DeliveryStatus.delivered);
+  });
+
   test('3b. sender with no peers queues, then sends on first link', () async {
     final net = FakeNetwork();
     final a = net.addNode('A');
@@ -144,6 +165,88 @@ void main() {
       (await statusOf(net.nodes['A']!, sent.id)).status,
       DeliveryStatus.delivered,
     );
+  });
+
+  test('blocked peers cannot be messaged and receive no relayed frames',
+      () async {
+    final net = FakeNetwork();
+    final a = net.addNode('A');
+    final b = net.addNode('B');
+    net.link('A', 'B');
+    await a.trustRepository.blockPeer(
+      'B',
+      nowMillis: DateTime.now().millisecondsSinceEpoch,
+    );
+
+    await expectLater(
+      a.router.sendText('B', 'blocked'),
+      throwsA(isA<PeerTrustException>()),
+    );
+    expect(await a.store.conversations(), isEmpty);
+    await a.router.sendSos('public alert');
+    await settle();
+    expect(await b.store.sosAlerts(), isEmpty,
+        reason: 'broadcast routing excludes a blocked BLE neighbour');
+  });
+
+  test('changed QR-pinned identities immediately block outgoing messages',
+      () async {
+    final net = FakeNetwork();
+    final a = net.addNode('A');
+    net.addNode('B');
+    final service = PeerTrustService(repository: a.trustRepository);
+    final oldIdentity = PublicIdentityMaterial(
+      peerId: 'B',
+      displayName: 'B',
+      keyId: 'key-1',
+      algorithm: 'test-only',
+      publicKey: [1, 2, 3],
+    );
+    await service.observe(oldIdentity);
+    final challenge = await service.prepareVerification(
+      expectedPeerId: 'B',
+      scannedQr: IdentityQrPayload.fromIdentity(oldIdentity).encode(),
+    );
+    await service.confirmVerification(challenge);
+    await service.observe(PublicIdentityMaterial(
+      peerId: 'B',
+      displayName: 'B',
+      keyId: 'key-2',
+      algorithm: 'test-only',
+      publicKey: [4, 5, 6],
+    ));
+
+    await expectLater(
+      a.router.sendText('B', 'must be blocked'),
+      throwsA(isA<PeerTrustException>()),
+    );
+    expect(await a.store.conversations(), isEmpty);
+  });
+
+  test('an ACK from the wrong peer cannot mark a message delivered',
+      () async {
+    final net = FakeNetwork();
+    final a = net.addNode('A');
+    final c = net.addNode('C');
+    net.addNode('B'); // Intended recipient is deliberately offline.
+    net.link('A', 'C');
+
+    final sent = await a.router.sendText('B', 'must not be forged');
+    final forgedAck = MeshMessage(
+      id: 'forged-ack',
+      type: MessageType.ack,
+      senderId: 'C',
+      senderName: 'C',
+      receiverId: 'A',
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      content: '0',
+      refId: sent.id,
+    );
+    await c.transport.broadcast(forgedAck.encode());
+    await settle();
+
+    expect((await statusOf(a, sent.id)).status,
+        isNot(DeliveryStatus.delivered));
   });
 
   test('5. high latency links still deliver', () async {
@@ -248,6 +351,22 @@ void main() {
     await settle();
 
     expect(await b.store.conversations(), isEmpty);
+  });
+
+  test('oversized and invalid-hop frames are rejected before routing', () {
+    final oversized = Uint8List(MeshConstants.maxFrameBytes + 1);
+    expect(MeshMessage.tryDecode(oversized), isNull);
+    final invalid = MeshMessage(
+      id: 'invalid-hop',
+      type: MessageType.text,
+      senderId: 'A',
+      senderName: 'Alice',
+      receiverId: 'B',
+      timestamp: 1,
+      content: 'x',
+      hopCount: -1,
+    );
+    expect(MeshMessage.tryDecode(invalid.encode()), isNull);
   });
 
   test('message JSON round-trips with spec field names', () {

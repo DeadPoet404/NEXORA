@@ -1,9 +1,15 @@
+import 'dart:async';
+
 import 'peer_trust.dart';
 import 'public_identity.dart';
 
 /// Test/preview-only trust repository. Production must use a durable store.
 class InMemoryPeerTrustRepository implements PeerTrustRepository {
   final _records = <String, PeerTrustRecord>{};
+  final _changes = StreamController<void>.broadcast();
+
+  @override
+  Stream<void> get trustChanges => _changes.stream;
 
   @override
   Future<PeerTrustRecord?> getPeerTrust(String peerId) async =>
@@ -20,6 +26,7 @@ class InMemoryPeerTrustRepository implements PeerTrustRepository {
       nowMillis: nowMillis,
     );
     _records[identity.peerId] = record;
+    _changes.add(null);
     return record;
   }
 
@@ -38,6 +45,7 @@ class InMemoryPeerTrustRepository implements PeerTrustRepository {
       nowMillis: nowMillis,
     );
     _records[identity.peerId] = record;
+    _changes.add(null);
     return record;
   }
 
@@ -47,13 +55,13 @@ class InMemoryPeerTrustRepository implements PeerTrustRepository {
     required int nowMillis,
   }) async {
     final previous = _records[peerId];
-    if (previous == null) {
-      throw const PeerTrustException(
-        'Cannot block a peer before an identity has been observed',
-      );
-    }
-    final record = PeerTrustTransitions.block(previous, nowMillis: nowMillis);
+    final record = PeerTrustTransitions.block(
+      previous,
+      peerId: peerId,
+      nowMillis: nowMillis,
+    );
     _records[peerId] = record;
+    _changes.add(null);
     return record;
   }
 }

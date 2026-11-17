@@ -48,7 +48,10 @@ class MeshController {
   Future<MeshPermissions> requestAndStart() async {
     final permissions = await requestMeshPermissions();
     _permissions = permissions;
-    if (permissions.bluetooth) await _start(permissions);
+    if (permissions.bluetooth) {
+      await _start(permissions);
+      await transport.retryDiscovery();
+    }
     return permissions;
   }
 

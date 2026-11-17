@@ -12,6 +12,7 @@ import 'services/mesh_bridge.dart';
 import 'services/mesh_controller.dart';
 import 'services/sos_service.dart';
 import 'security/backend_contracts.dart';
+import 'security/peer_trust.dart';
 import 'state/providers.dart';
 
 /// Runs both when the user opens the app and when Android starts the
@@ -22,11 +23,17 @@ Future<void> main() async {
 
   final store = await SqliteMessageStore.open();
   final identity = await IdentityService.load(store);
-  final transport = BleTransport(identity: () => identity.current);
+  final peerTrust = PeerTrustService(repository: store);
+  final transport = BleTransport(
+    identity: () => identity.current,
+    peerRegistry: store,
+    messagingPolicy: peerTrust,
+  );
   final router = MeshRouter(
     transport: transport,
     store: store,
     identity: identity.current,
+    messagingPolicy: peerTrust,
   )..start();
   identity.changes.listen((id) => router.identity = id);
   final bridge = MeshBridge();
@@ -43,6 +50,8 @@ Future<void> main() async {
       overrides: [
         storeProvider.overrideWithValue(store),
         peerTrustRepositoryProvider.overrideWithValue(store),
+        peerRegistryProvider.overrideWithValue(store),
+        peerTrustServiceProvider.overrideWithValue(peerTrust),
         localIdentityProvider.overrideWithValue(
           const UnconfiguredLocalIdentityProvider(),
         ),

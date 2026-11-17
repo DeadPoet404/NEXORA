@@ -11,18 +11,21 @@ import '../models/stored_message.dart';
 import '../security/peer_trust.dart';
 import '../security/public_identity.dart';
 import 'message_store.dart';
+import 'peer_registry.dart';
 
-class SqliteMessageStore implements MessageStore, PeerTrustRepository {
+class SqliteMessageStore
+    implements MessageStore, PeerTrustRepository, PeerRegistry {
   SqliteMessageStore._(this._db);
 
   final Database _db;
   final _changes = StreamController<void>.broadcast();
+  final _trustChanges = StreamController<void>.broadcast();
 
   static Future<SqliteMessageStore> open() async {
     final path = p.join(await getDatabasesPath(), 'linkmesh.db');
     final db = await openDatabase(
       path,
-      version: 3,
+      version: 5,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE messages (
@@ -51,10 +54,13 @@ class SqliteMessageStore implements MessageStore, PeerTrustRepository {
         );
         await _createRelayQueue(db);
         await _createPeerTrustTable(db);
+        await _createKnownPeersTable(db);
       },
       onUpgrade: (db, oldVersion, _) async {
         if (oldVersion < 2) await _createRelayQueue(db);
         if (oldVersion < 3) await _createPeerTrustTable(db);
+        if (oldVersion < 4) await _rebuildPeerTrustTable(db);
+        if (oldVersion < 5) await _createKnownPeersTable(db);
       },
     );
     return SqliteMessageStore._(db);
@@ -74,10 +80,10 @@ class SqliteMessageStore implements MessageStore, PeerTrustRepository {
     CREATE TABLE peer_trust (
       peer_id TEXT PRIMARY KEY,
       state TEXT NOT NULL,
-      observed_key_id TEXT NOT NULL,
-      observed_algorithm TEXT NOT NULL,
-      observed_fingerprint TEXT NOT NULL,
-      observed_public_key BLOB NOT NULL,
+      observed_key_id TEXT,
+      observed_algorithm TEXT,
+      observed_fingerprint TEXT,
+      observed_public_key BLOB,
       pinned_key_id TEXT,
       pinned_algorithm TEXT,
       pinned_fingerprint TEXT,
@@ -86,8 +92,37 @@ class SqliteMessageStore implements MessageStore, PeerTrustRepository {
     )
   ''');
 
+  static Future<void> _rebuildPeerTrustTable(DatabaseExecutor db) async {
+    await db.execute('ALTER TABLE peer_trust RENAME TO peer_trust_v3');
+    await _createPeerTrustTable(db);
+    await db.execute('''
+      INSERT INTO peer_trust (
+        peer_id, state, observed_key_id, observed_algorithm,
+        observed_fingerprint, observed_public_key, pinned_key_id,
+        pinned_algorithm, pinned_fingerprint, pinned_public_key, updated_at
+      )
+      SELECT peer_id, state, observed_key_id, observed_algorithm,
+        observed_fingerprint, observed_public_key, pinned_key_id,
+        pinned_algorithm, pinned_fingerprint, pinned_public_key, updated_at
+      FROM peer_trust_v3
+    ''');
+    await db.execute('DROP TABLE peer_trust_v3');
+  }
+
+  static Future<void> _createKnownPeersTable(DatabaseExecutor db) =>
+      db.execute('''
+    CREATE TABLE known_peers (
+      peer_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      last_seen INTEGER NOT NULL
+    )
+  ''');
+
   @override
   Stream<void> get changes => _changes.stream;
+
+  @override
+  Stream<void> get trustChanges => _trustChanges.stream;
 
   @override
   Future<StoredMessage?> get(String id) async {
@@ -98,6 +133,59 @@ class SqliteMessageStore implements MessageStore, PeerTrustRepository {
   @override
   Future<void> save(StoredMessage stored) async {
     await _writeStored(_db, stored);
+    _changes.add(null);
+  }
+
+  @override
+  Future<bool> completeOutgoingDelivery({
+    required String messageId,
+    required String recipientId,
+    required int relayHops,
+  }) async {
+    final completed = await _db.transaction((txn) async {
+      final rows = await txn.query(
+        'messages',
+        where: 'id = ?',
+        whereArgs: [messageId],
+      );
+      if (rows.isEmpty) return false;
+      final stored = _fromRow(rows.single);
+      if (!stored.outgoing || stored.message.receiverId != recipientId) {
+        return false;
+      }
+      await _writeStored(
+        txn,
+        stored.copyWith(
+          status: DeliveryStatus.delivered,
+          relayHops: relayHops,
+        ),
+      );
+      await txn.delete('relay_queue', where: 'id = ?', whereArgs: [messageId]);
+      return true;
+    });
+    if (completed) _changes.add(null);
+    return completed;
+  }
+
+  @override
+  Future<void> expireOutgoingMessage(String messageId) async {
+    await _db.transaction((txn) async {
+      final rows = await txn.query(
+        'messages',
+        where: 'id = ?',
+        whereArgs: [messageId],
+      );
+      if (rows.isNotEmpty) {
+        final stored = _fromRow(rows.single);
+        if (stored.outgoing && stored.status != DeliveryStatus.delivered) {
+          await _writeStored(
+            txn,
+            stored.copyWith(status: DeliveryStatus.expired),
+          );
+        }
+      }
+      await txn.delete('relay_queue', where: 'id = ?', whereArgs: [messageId]);
+    });
     _changes.add(null);
   }
 
@@ -184,7 +272,31 @@ class SqliteMessageStore implements MessageStore, PeerTrustRepository {
 
   @override
   Future<List<RelayQueueEntry>> loadRelayQueue(int nowMillis) async {
-    return _db.transaction((txn) async {
+    final entries = await _db.transaction((txn) async {
+      final expired = await txn.query(
+        'relay_queue',
+        columns: ['id'],
+        where: 'expires_at <= ?',
+        whereArgs: [nowMillis],
+      );
+      for (final row in expired) {
+        final messageId = row['id']! as String;
+        final storedRows = await txn.query(
+          'messages',
+          where: 'id = ?',
+          whereArgs: [messageId],
+        );
+        if (storedRows.isNotEmpty) {
+          final stored = _fromRow(storedRows.single);
+          if (stored.outgoing &&
+              stored.status != DeliveryStatus.delivered) {
+            await _writeStored(
+              txn,
+              stored.copyWith(status: DeliveryStatus.expired),
+            );
+          }
+        }
+      }
       await txn.delete(
         'relay_queue',
         where: 'expires_at <= ?',
@@ -206,6 +318,7 @@ class SqliteMessageStore implements MessageStore, PeerTrustRepository {
         );
       }).toList();
     });
+    return entries;
   }
 
   Future<void> _trimRelayQueue(DatabaseExecutor db) => db.execute('''
@@ -276,6 +389,61 @@ class SqliteMessageStore implements MessageStore, PeerTrustRepository {
   }
 
   @override
+  Future<void> rememberPeer({
+    required String peerId,
+    required String displayName,
+    required int lastSeenMillis,
+  }) async {
+    await _db.transaction((txn) async {
+      final rows = await txn.query(
+        'known_peers',
+        columns: ['display_name', 'last_seen'],
+        where: 'peer_id = ?',
+        whereArgs: [peerId],
+      );
+      final previous = rows.isEmpty ? null : rows.single;
+      final previousLastSeen = previous?['last_seen'] as int?;
+      await txn.insert(
+        'known_peers',
+        {
+          'peer_id': peerId,
+          'display_name': displayName.isNotEmpty
+              ? displayName
+              : (previous?['display_name'] as String? ?? ''),
+          'last_seen': previousLastSeen == null ||
+                  lastSeenMillis > previousLastSeen
+              ? lastSeenMillis
+              : previousLastSeen,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.execute('''
+        DELETE FROM known_peers
+        WHERE peer_id NOT IN (
+          SELECT peer_id FROM known_peers
+          ORDER BY last_seen DESC
+          LIMIT ?
+        )
+      ''', [BleConstants.maxKnownPeers]);
+    });
+    _changes.add(null);
+  }
+
+  @override
+  Future<List<KnownPeer>> knownPeers() async {
+    final rows = await _db.query('known_peers', orderBy: 'last_seen DESC');
+    return rows
+        .map((row) => KnownPeer(
+              peerId: row['peer_id']! as String,
+              displayName: row['display_name']! as String,
+              lastSeen: DateTime.fromMillisecondsSinceEpoch(
+                row['last_seen']! as int,
+              ),
+            ))
+        .toList();
+  }
+
+  @override
   Future<PeerTrustRecord?> getPeerTrust(String peerId) async {
     final rows = await _db.query(
       'peer_trust',
@@ -289,72 +457,80 @@ class SqliteMessageStore implements MessageStore, PeerTrustRepository {
   Future<PeerTrustRecord> observePeerIdentity(
     PublicIdentityMaterial identity, {
     required int nowMillis,
-  }) =>
-      _db.transaction((txn) async {
-        final rows = await txn.query(
-          'peer_trust',
-          where: 'peer_id = ?',
-          whereArgs: [identity.peerId],
-        );
-        final previous = rows.isEmpty ? null : _peerTrustFromRow(rows.single);
-        final updated = PeerTrustTransitions.observe(
-          previous,
-          identity,
-          nowMillis: nowMillis,
-        );
-        await _writePeerTrust(txn, updated);
-        return updated;
-      });
+  }) async {
+    final updated = await _db.transaction((txn) async {
+      final rows = await txn.query(
+        'peer_trust',
+        where: 'peer_id = ?',
+        whereArgs: [identity.peerId],
+      );
+      final previous = rows.isEmpty ? null : _peerTrustFromRow(rows.single);
+      final record = PeerTrustTransitions.observe(
+        previous,
+        identity,
+        nowMillis: nowMillis,
+      );
+      await _writePeerTrust(txn, record);
+      return record;
+    });
+    _trustChanges.add(null);
+    _changes.add(null);
+    return updated;
+  }
 
   @override
   Future<PeerTrustRecord> confirmQrIdentity(
     QrVerificationChallenge challenge, {
     required int nowMillis,
-  }) =>
-      _db.transaction((txn) async {
-        final identity = challenge.identity;
-        if (challenge.expectedPeerId != identity.peerId) {
-          throw const PeerTrustException('QR peer ID does not match challenge');
-        }
-        final rows = await txn.query(
-          'peer_trust',
-          where: 'peer_id = ?',
-          whereArgs: [identity.peerId],
-        );
-        final previous = rows.isEmpty ? null : _peerTrustFromRow(rows.single);
-        final verified = PeerTrustTransitions.confirm(
-          previous,
-          identity,
-          nowMillis: nowMillis,
-        );
-        await _writePeerTrust(txn, verified);
-        return verified;
-      });
+  }) async {
+    final verified = await _db.transaction((txn) async {
+      final identity = challenge.identity;
+      if (challenge.expectedPeerId != identity.peerId) {
+        throw const PeerTrustException('QR peer ID does not match challenge');
+      }
+      final rows = await txn.query(
+        'peer_trust',
+        where: 'peer_id = ?',
+        whereArgs: [identity.peerId],
+      );
+      final previous = rows.isEmpty ? null : _peerTrustFromRow(rows.single);
+      final record = PeerTrustTransitions.confirm(
+        previous,
+        identity,
+        nowMillis: nowMillis,
+      );
+      await _writePeerTrust(txn, record);
+      return record;
+    });
+    _trustChanges.add(null);
+    _changes.add(null);
+    return verified;
+  }
 
   @override
   Future<PeerTrustRecord> blockPeer(
     String peerId, {
     required int nowMillis,
-  }) =>
-      _db.transaction((txn) async {
-        final rows = await txn.query(
-          'peer_trust',
-          where: 'peer_id = ?',
-          whereArgs: [peerId],
-        );
-        if (rows.isEmpty) {
-          throw const PeerTrustException(
-            'Cannot block a peer before an identity has been observed',
-          );
-        }
-        final previous = _peerTrustFromRow(rows.single);
-        final blocked = PeerTrustTransitions.block(
-          previous,
-          nowMillis: nowMillis,
-        );
-        await _writePeerTrust(txn, blocked);
-        return blocked;
-      });
+  }) async {
+    final blocked = await _db.transaction((txn) async {
+      final rows = await txn.query(
+        'peer_trust',
+        where: 'peer_id = ?',
+        whereArgs: [peerId],
+      );
+      final previous = rows.isEmpty ? null : _peerTrustFromRow(rows.single);
+      final record = PeerTrustTransitions.block(
+        previous,
+        peerId: peerId,
+        nowMillis: nowMillis,
+      );
+      await _writePeerTrust(txn, record);
+      return record;
+    });
+    _trustChanges.add(null);
+    _changes.add(null);
+    return blocked;
+  }
 
   Future<void> _writePeerTrust(
     DatabaseExecutor db,
@@ -368,7 +544,9 @@ class SqliteMessageStore implements MessageStore, PeerTrustRepository {
           'observed_key_id': record.observedKeyId,
           'observed_algorithm': record.observedAlgorithm,
           'observed_fingerprint': record.observedFingerprint,
-          'observed_public_key': Uint8List.fromList(record.observedPublicKey),
+          'observed_public_key': record.observedPublicKey == null
+              ? null
+              : Uint8List.fromList(record.observedPublicKey!),
           'pinned_key_id': record.pinnedKeyId,
           'pinned_algorithm': record.pinnedAlgorithm,
           'pinned_fingerprint': record.pinnedFingerprint,
@@ -383,10 +561,10 @@ class SqliteMessageStore implements MessageStore, PeerTrustRepository {
   PeerTrustRecord _peerTrustFromRow(Map<String, Object?> row) =>
       PeerTrustRecord(
         peerId: row['peer_id']! as String,
-        observedKeyId: row['observed_key_id']! as String,
-        observedAlgorithm: row['observed_algorithm']! as String,
-        observedFingerprint: row['observed_fingerprint']! as String,
-        observedPublicKey: row['observed_public_key']! as Uint8List,
+        observedKeyId: row['observed_key_id'] as String?,
+        observedAlgorithm: row['observed_algorithm'] as String?,
+        observedFingerprint: row['observed_fingerprint'] as String?,
+        observedPublicKey: row['observed_public_key'] as Uint8List?,
         pinnedKeyId: row['pinned_key_id'] as String?,
         pinnedAlgorithm: row['pinned_algorithm'] as String?,
         pinnedFingerprint: row['pinned_fingerprint'] as String?,

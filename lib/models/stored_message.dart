@@ -13,6 +13,9 @@ enum DeliveryStatus {
 
   /// The recipient sent back a receipt.
   delivered,
+
+  /// The durable forwarding window ended before a recipient receipt arrived.
+  expired,
 }
 
 /// A message as kept on this device, with local-only bookkeeping.

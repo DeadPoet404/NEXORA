@@ -28,6 +28,17 @@ abstract class MessageStore {
   /// Inserts or replaces by message id.
   Future<void> save(StoredMessage message);
 
+  /// Atomically advances an outgoing message to delivered and removes its
+  /// durable relay entry only when the receipt peer is the intended recipient.
+  Future<bool> completeOutgoingDelivery({
+    required String messageId,
+    required String recipientId,
+    required int relayHops,
+  });
+
+  /// Marks an undelivered outgoing message expired and removes its relay entry.
+  Future<void> expireOutgoingMessage(String messageId);
+
   /// Atomically stores a newly originated outgoing message and its relay queue
   /// entry, so a process death cannot leave a saved but unsendable message.
   Future<void> saveOutgoingAndEnqueueRelay({
@@ -81,6 +92,39 @@ class InMemoryMessageStore implements MessageStore {
   }
 
   @override
+  Future<bool> completeOutgoingDelivery({
+    required String messageId,
+    required String recipientId,
+    required int relayHops,
+  }) async {
+    final stored = _messages[messageId];
+    if (stored == null ||
+        !stored.outgoing ||
+        stored.message.receiverId != recipientId) {
+      return false;
+    }
+    _messages[messageId] = stored.copyWith(
+      status: DeliveryStatus.delivered,
+      relayHops: relayHops,
+    );
+    _relayQueue.remove(messageId);
+    _changes.add(null);
+    return true;
+  }
+
+  @override
+  Future<void> expireOutgoingMessage(String messageId) async {
+    final stored = _messages[messageId];
+    if (stored != null &&
+        stored.outgoing &&
+        stored.status != DeliveryStatus.delivered) {
+      _messages[messageId] = stored.copyWith(status: DeliveryStatus.expired);
+    }
+    _relayQueue.remove(messageId);
+    _changes.add(null);
+  }
+
+  @override
   Future<void> saveOutgoingAndEnqueueRelay({
     required StoredMessage storedMessage,
     required int enqueuedAtMillis,
@@ -127,7 +171,13 @@ class InMemoryMessageStore implements MessageStore {
 
   @override
   Future<List<RelayQueueEntry>> loadRelayQueue(int nowMillis) async {
-    _relayQueue.removeWhere((_, entry) => entry.expiresAtMillis <= nowMillis);
+    final expiredIds = _relayQueue.entries
+        .where((entry) => entry.value.expiresAtMillis <= nowMillis)
+        .map((entry) => entry.key)
+        .toList();
+    for (final id in expiredIds) {
+      await expireOutgoingMessage(id);
+    }
     while (_relayQueue.length > MeshConstants.relayBufferMaxSize) {
       _relayQueue.remove(_relayQueue.keys.first);
     }

@@ -7,6 +7,8 @@ import 'package:linkmesh/mesh/transport.dart';
 import 'package:linkmesh/models/node_identity.dart';
 import 'package:linkmesh/models/peer.dart';
 import 'package:linkmesh/models/stored_message.dart';
+import 'package:linkmesh/security/in_memory_peer_trust_repository.dart';
+import 'package:linkmesh/security/peer_trust.dart';
 
 /// Simulated radio neighbourhood: nodes only hear nodes they're linked to.
 class FakeNetwork {
@@ -20,12 +22,21 @@ class FakeNetwork {
   TestNode addNode(String id, {CountingStore? store}) {
     final transport = FakeTransport(id, this);
     final nodeStore = store ?? CountingStore();
+    final trustRepository = InMemoryPeerTrustRepository();
+    final trust = PeerTrustService(repository: trustRepository);
     final router = MeshRouter(
       transport: transport,
       store: nodeStore,
       identity: NodeIdentity(id: id, name: id),
+      messagingPolicy: trust,
     )..start();
-    return nodes[id] = TestNode(id, transport, nodeStore, router);
+    return nodes[id] = TestNode(
+      id,
+      transport,
+      nodeStore,
+      router,
+      trustRepository,
+    );
   }
 
   /// Recreates a node's router while keeping its transport and store. The
@@ -33,12 +44,20 @@ class FakeNetwork {
   Future<TestNode> restartNode(String id) async {
     final previous = nodes[id]!;
     await previous.router.dispose();
+    final trust = PeerTrustService(repository: previous.trustRepository);
     final router = MeshRouter(
       transport: previous.transport,
       store: previous.store,
       identity: NodeIdentity(id: id, name: id),
+      messagingPolicy: trust,
     )..start();
-    return nodes[id] = TestNode(id, previous.transport, previous.store, router);
+    return nodes[id] = TestNode(
+      id,
+      previous.transport,
+      previous.store,
+      router,
+      previous.trustRepository,
+    );
   }
 
   static String _key(String a, String b) =>
@@ -74,12 +93,19 @@ class FakeNetwork {
 }
 
 class TestNode {
-  TestNode(this.id, this.transport, this.store, this.router);
+  TestNode(
+    this.id,
+    this.transport,
+    this.store,
+    this.router,
+    this.trustRepository,
+  );
 
   final String id;
   final FakeTransport transport;
   final CountingStore store;
   final MeshRouter router;
+  final InMemoryPeerTrustRepository trustRepository;
 }
 
 class CountingStore extends InMemoryMessageStore {
@@ -88,6 +114,21 @@ class CountingStore extends InMemoryMessageStore {
   @override
   Future<void> save(StoredMessage message) {
     saves.update(message.id, (n) => n + 1, ifAbsent: () => 1);
+    return super.save(message);
+  }
+}
+
+class FailOnceIncomingStore extends CountingStore {
+  bool failNextIncomingText = true;
+
+  @override
+  Future<void> save(StoredMessage message) {
+    if (failNextIncomingText &&
+        !message.outgoing &&
+        message.message.type.name == 'text') {
+      failNextIncomingText = false;
+      return Future<void>.error(StateError('simulated disk interruption'));
+    }
     return super.save(message);
   }
 }
@@ -110,7 +151,16 @@ class FakeTransport implements MeshTransport {
   Stream<Uint8List> get incoming => _incoming.stream;
 
   @override
-  List<Peer> get peers => const [];
+  List<Peer> get peers => network.neighbours(id)
+      .map((peerId) => Peer(
+            address: peerId,
+            nodeId: peerId,
+            name: peerId,
+            state: PeerLinkState.connected,
+            rssi: -50,
+            lastSeen: DateTime.now(),
+          ))
+      .toList();
 
   @override
   Stream<List<Peer>> get peerChanges => const Stream.empty();
@@ -122,14 +172,23 @@ class FakeTransport implements MeshTransport {
   Future<void> start() async {}
 
   @override
+  Future<void> retryDiscovery() async {}
+
+  @override
   Future<void> stop() async {}
 
   @override
   void setBackground(bool background) {}
 
   @override
-  Future<int> broadcast(Uint8List frame) async {
-    final targets = network.neighbours(id).toList();
+  Future<int> broadcast(
+    Uint8List frame, {
+    Set<String> excludeNodeIds = const {},
+  }) async {
+    final targets = network
+        .neighbours(id)
+        .where((peerId) => !excludeNodeIds.contains(peerId))
+        .toList();
     for (final t in targets) {
       network._deliver(id, t, frame);
     }

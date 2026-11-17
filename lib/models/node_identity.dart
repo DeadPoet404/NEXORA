@@ -14,10 +14,10 @@ class NodeIdentity {
   static NodeIdentity? tryDecode(List<int> bytes) {
     try {
       final json = jsonDecode(utf8.decode(bytes)) as Map<String, Object?>;
-      return NodeIdentity(
-        id: json['id']! as String,
-        name: (json['name'] as String?) ?? '',
-      );
+      final id = json['id']! as String;
+      final name = (json['name'] as String?) ?? '';
+      if (id.isEmpty || id.length > 128 || name.length > 128) return null;
+      return NodeIdentity(id: id, name: name);
     } catch (_) {
       return null;
     }

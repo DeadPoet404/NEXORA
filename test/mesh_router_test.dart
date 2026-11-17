@@ -116,9 +116,11 @@ void main() {
     final a = net.addNode('A');
     final recipientStore = FailOnceIncomingStore();
     final b = net.addNode('B', store: recipientStore);
-    net.link('A', 'B');
 
+    // Queue before connecting so only the reconnect flush sends the first
+    // attempt; otherwise the initial broadcast can race with that flush.
     final sent = await a.router.sendText('B', 'retry after disk failure');
+    net.link('A', 'B');
     await recipientStore.firstIncomingTextFailure.future
         .timeout(const Duration(seconds: 2));
     // Let the failed frame handler release its in-flight reservation before

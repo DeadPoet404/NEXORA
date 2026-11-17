@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
-import '../security/peer_trust.dart';
 import '../state/providers.dart';
 
 class VerifyPeerQrScreen extends ConsumerStatefulWidget {

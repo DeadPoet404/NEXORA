@@ -56,7 +56,7 @@ class PublishedPreKeyBundle {
     required List<int> signedPreKey,
     required List<int> signedPreKeySignature,
     this.oneTimePreKeyId,
-    this.oneTimePreKey,
+    List<int>? oneTimePreKey,
   })  : identityPublicKey = Uint8List.fromList(identityPublicKey),
         signedPreKey = Uint8List.fromList(signedPreKey),
         signedPreKeySignature = Uint8List.fromList(signedPreKeySignature),

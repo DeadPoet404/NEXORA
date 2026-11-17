@@ -119,17 +119,29 @@ class CountingStore extends InMemoryMessageStore {
 }
 
 class FailOnceIncomingStore extends CountingStore {
+  final firstIncomingTextFailure = Completer<void>();
+  final firstIncomingTextSaved = Completer<void>();
   bool failNextIncomingText = true;
 
   @override
   Future<void> save(StoredMessage message) {
-    if (failNextIncomingText &&
-        !message.outgoing &&
-        message.message.type.name == 'text') {
+    final isIncomingText =
+        !message.outgoing && message.message.type.name == 'text';
+    if (failNextIncomingText && isIncomingText) {
       failNextIncomingText = false;
-      return Future<void>.error(StateError('simulated disk interruption'));
+      return Future<void>.error(
+        StateError('simulated disk interruption'),
+      ).whenComplete(() {
+        if (!firstIncomingTextFailure.isCompleted) {
+          firstIncomingTextFailure.complete();
+        }
+      });
     }
-    return super.save(message);
+    final saved = super.save(message);
+    if (isIncomingText && !firstIncomingTextSaved.isCompleted) {
+      return saved.then((_) => firstIncomingTextSaved.complete());
+    }
+    return saved;
   }
 }
 

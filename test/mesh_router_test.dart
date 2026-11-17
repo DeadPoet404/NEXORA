@@ -114,14 +114,21 @@ void main() {
       () async {
     final net = FakeNetwork();
     final a = net.addNode('A');
-    final b = net.addNode('B', store: FailOnceIncomingStore());
+    final recipientStore = FailOnceIncomingStore();
+    final b = net.addNode('B', store: recipientStore);
     net.link('A', 'B');
 
     final sent = await a.router.sendText('B', 'retry after disk failure');
-    await settle();
+    await recipientStore.firstIncomingTextFailure.future
+        .timeout(const Duration(seconds: 2));
+    // Let the failed frame handler release its in-flight reservation before
+    // replaying, so the test exercises a completed failure, not a race.
+    await settle(Duration.zero);
     expect(await b.store.conversation('A'), isEmpty);
 
     await a.transport.broadcast(sent.message.encode());
+    await recipientStore.firstIncomingTextSaved.future
+        .timeout(const Duration(seconds: 2));
     await settle();
     expect((await b.store.conversation('A')).single.message.content,
         'retry after disk failure');

@@ -13,6 +13,7 @@ import '../services/permissions.dart';
 import '../state/providers.dart';
 import 'chat_screen.dart';
 import 'chats_tab.dart';
+import 'my_identity_qr_screen.dart';
 import 'nearby_tab.dart';
 import 'settings_sheet.dart';
 import 'sos_tab.dart';
@@ -120,6 +121,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         ),
         actions: [
           SignalBars(bars: bestBars, active: connected.isNotEmpty),
+          IconButton(
+            tooltip: 'Show identity QR',
+            icon: const Icon(Icons.qr_code_2),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const MyIdentityQrScreen(),
+              ),
+            ),
+          ),
           IconButton(
             tooltip: identity == null ? 'Profile' : 'You: ${identity.name}',
             icon: const Icon(Icons.account_circle_outlined),

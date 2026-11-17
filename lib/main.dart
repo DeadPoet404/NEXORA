@@ -11,6 +11,7 @@ import 'services/location_service.dart';
 import 'services/mesh_bridge.dart';
 import 'services/mesh_controller.dart';
 import 'services/sos_service.dart';
+import 'security/backend_contracts.dart';
 import 'state/providers.dart';
 
 /// Runs both when the user opens the app and when Android starts the
@@ -41,6 +42,10 @@ Future<void> main() async {
     ProviderScope(
       overrides: [
         storeProvider.overrideWithValue(store),
+        peerTrustRepositoryProvider.overrideWithValue(store),
+        localIdentityProvider.overrideWithValue(
+          const UnconfiguredLocalIdentityProvider(),
+        ),
         transportProvider.overrideWithValue(transport),
         routerProvider.overrideWithValue(router),
         identityServiceProvider.overrideWithValue(identity),

@@ -1,6 +1,6 @@
-# HYBRID-01 Security Design — Proposal
+# LinkMesh Security Design
 
-**Status:** design proposal; no cryptography has been implemented by this document. The first implementation should wait until the identity and key-verification decisions below are agreed and its cryptographic dependencies have been reviewed.
+**Status:** security architecture and implementation guardrails. Product scaffolding now includes QR payload/fingerprint handling, explicit peer trust state, persistence interfaces, and UI verification surfaces. No cryptographic identity backend, message encryption, authenticated receipts, or secure key storage is implemented. Messages remain plaintext and development-only.
 
 ## 1. Security goals
 
@@ -130,9 +130,9 @@ An isolated Dart test package is committed at [`tool/signal_protocol_spike`](../
 
 This is a source-level risk review of the exact pinned candidate revision, not a cryptographic audit or a legal opinion. Links below are pinned to commit `9c871c05629e60f23fed6e7cec863c8aaff696d9`.
 
-### Licensing gate — unresolved; do not integrate or distribute yet
+### Licensing status — owner-reported resolved; still isolated
 
-The candidate's [`LICENSE`](https://github.com/MixinNetwork/libsignal_protocol_dart/blob/9c871c05629e60f23fed6e7cec863c8aaff696d9/LICENSE) is GNU GPL-3.0. This app repository has no declared root licence; [`UPSTREAM.md`](../UPSTREAM.md) records that LinkMesh's source repository also declares no project licence and that the owner granted permission for this non-commercial experiment. That permission is separate from the candidate and other dependency licences. Non-commercial use alone does not waive GPL terms. Whether linking this package into the Flutter app and conveying an APK/source constitutes a GPL-covered combined work, and what source, notice, and installation information duties follow, requires a qualified licensing review. The candidate is **not cleared for app integration or APK distribution**. `flutter_blue_plus` and every other dependency remain separate licence reviews.
+The candidate's [`LICENSE`](https://github.com/MixinNetwork/libsignal_protocol_dart/blob/9c871c05629e60f23fed6e7cec863c8aaff696d9/LICENSE) is GNU GPL-3.0. The project owner reports that licensing has been resolved. This is recorded as the owner's decision, not an independent legal assessment. Per the explicit project instruction, the candidate remains **isolated and must not be integrated, imported by product code, or distributed with the app** until the outstanding technical security issues below are resolved. `flutter_blue_plus` and every other dependency remain separate licence reviews.
 
 ### Source-level findings and required controls
 
@@ -144,4 +144,18 @@ The candidate's [`LICENSE`](https://github.com/MixinNetwork/libsignal_protocol_d
 
 ### Decision
 
-Keep the candidate **isolated and unintegrated**. The successful harness run supports API feasibility, but it does not clear the GPL gate or the source-level risks above. Next gates are (1) resolve distribution/licensing compatibility in writing, (2) obtain specialist review of the cryptographic implementation and dependency chain, (3) resolve the missing-key asynchronous error path, and (4) design and test the app's pinned-identity, Android-keystore-backed, transactional and serialized store adapter. Until all gates pass, the app remains plaintext and must not handle sensitive content or coordinates.
+Keep the candidate **isolated and unintegrated**. The successful harness run supports API feasibility, but does not resolve the source-level risks above. The owner reports that licensing is resolved; that report does not change the explicit technical isolation requirement. Remaining gates are (1) obtain specialist review of the cryptographic implementation and dependency chain, (2) resolve the missing-key asynchronous error path, and (3) design and test the app's pinned-identity, Android-keystore-backed, transactional and serialized store adapter. Until those gates pass and integration is explicitly authorized, the app remains plaintext and must not handle sensitive content or coordinates.
+
+## 14. Product security scaffolding milestone (2026-11-16)
+
+This milestone adds non-cryptographic trust and UI boundaries; it does not implement secure messaging:
+
+- A versioned `nexora.identity` QR payload carries public-key metadata and a SHA-256 display fingerprint bound to peer ID, algorithm, key ID, and key bytes. The fingerprint detects payload inconsistency; it is not a signature or proof of BLE origin.
+- Peer trust is persisted separately from BLE link state as `unverified`, `verified`, `identityChanged`, or `blocked`. First observation never marks a key verified. Changed keys retain the old pin and are locked from QR re-verification; there is no silent replacement flow.
+- Nearby peers expose an explicit QR scan action. The user must compare the full displayed fingerprint in person and explicitly confirm. QR parsing, peer-ID matching, existing observations, and pinned-key consistency are checked before a challenge is shown and again atomically when the repository commits the pin.
+- The local identity screen is deliberately non-functional until a reviewed key backend is configured: it explains that the app currently has only a mesh node ID and will not present it as a cryptographic identity. The scanner can only pin public identity material supplied in a valid QR; BLE observation of public identity keys is not yet integrated.
+- Backend interfaces cover secure key storage, local identity, prekeys, sessions, and message cipher operations. They have no production implementations. Per-peer serialization is available for future stateful session operations, and an in-memory trust repository is test-only.
+- A persistent warning in chat states that messages are plaintext. Scanning or pinning a public key does not authenticate current BLE messages, protect SOS, encrypt content, or make receipts authenticated.
+- `mobile_scanner`, `qr_flutter`, and `crypto` are added for QR scanning/rendering and SHA-256 display fingerprints. No candidate Signal library is imported or depended on by product code.
+
+Focused tests were added for QR round-tripping/tampering, no automatic trust, explicit verification, wrong-peer rejection, changed-key lockout, blocking, per-peer serialization, and error recovery. SQLite persistence and Flutter widget/camera behavior still need runtime validation. The current execution environment had no `dart` or `flutter` executable when checked, so no product test/analyzer result is claimed. Next implementation milestone: wire authenticated BLE identity observation from a reviewed identity backend, add persistent SQLite and widget integration tests, and only then decide whether the local key screen can display an actual key. Keep all messaging plaintext and development-only until separate cryptographic integration gates are completed.

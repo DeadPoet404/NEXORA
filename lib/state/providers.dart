@@ -6,6 +6,8 @@ import '../mesh/transport.dart';
 import '../models/node_identity.dart';
 import '../models/peer.dart';
 import '../models/stored_message.dart';
+import '../security/backend_contracts.dart';
+import '../security/peer_trust.dart';
 import '../services/alert_service.dart';
 import '../services/identity_service.dart';
 import '../services/mesh_bridge.dart';
@@ -14,6 +16,17 @@ import '../services/sos_service.dart';
 
 // Services are created in main() and injected via overrides.
 final storeProvider = Provider<MessageStore>((_) => throw UnimplementedError());
+final peerTrustRepositoryProvider =
+    Provider<PeerTrustRepository>((_) => throw UnimplementedError());
+final localIdentityProvider =
+    Provider<LocalIdentityProvider>((_) => throw UnimplementedError());
+final peerTrustServiceProvider = Provider<PeerTrustService>(
+  (ref) => PeerTrustService(repository: ref.watch(peerTrustRepositoryProvider)),
+);
+final peerTrustRecordProvider =
+    FutureProvider.family<PeerTrustRecord?, String>((ref, peerId) {
+  return ref.watch(peerTrustRepositoryProvider).getPeerTrust(peerId);
+});
 final transportProvider =
     Provider<MeshTransport>((_) => throw UnimplementedError());
 final routerProvider = Provider<MeshRouter>((_) => throw UnimplementedError());

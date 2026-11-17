@@ -5,6 +5,7 @@ import '../models/peer.dart';
 import '../services/alert_service.dart';
 import '../state/providers.dart';
 import 'widgets/message_bubble.dart';
+import 'widgets/plaintext_security_notice.dart';
 import 'widgets/signal_bars.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
@@ -79,6 +80,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ),
       body: Column(
         children: [
+          const PlaintextSecurityNotice(),
           Expanded(
             child: messages.when(
               loading: () => const Center(child: CircularProgressIndicator()),

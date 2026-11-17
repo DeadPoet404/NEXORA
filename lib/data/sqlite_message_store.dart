@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
@@ -7,9 +8,11 @@ import 'package:sqflite/sqflite.dart';
 import '../core/constants.dart';
 import '../models/mesh_message.dart';
 import '../models/stored_message.dart';
+import '../security/peer_trust.dart';
+import '../security/public_identity.dart';
 import 'message_store.dart';
 
-class SqliteMessageStore implements MessageStore {
+class SqliteMessageStore implements MessageStore, PeerTrustRepository {
   SqliteMessageStore._(this._db);
 
   final Database _db;
@@ -19,7 +22,7 @@ class SqliteMessageStore implements MessageStore {
     final path = p.join(await getDatabasesPath(), 'linkmesh.db');
     final db = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE messages (
@@ -47,9 +50,11 @@ class SqliteMessageStore implements MessageStore {
           'CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
         );
         await _createRelayQueue(db);
+        await _createPeerTrustTable(db);
       },
       onUpgrade: (db, oldVersion, _) async {
         if (oldVersion < 2) await _createRelayQueue(db);
+        if (oldVersion < 3) await _createPeerTrustTable(db);
       },
     );
     return SqliteMessageStore._(db);
@@ -61,6 +66,23 @@ class SqliteMessageStore implements MessageStore {
       message_json TEXT NOT NULL,
       enqueued_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL
+    )
+  ''');
+
+  static Future<void> _createPeerTrustTable(DatabaseExecutor db) =>
+      db.execute('''
+    CREATE TABLE peer_trust (
+      peer_id TEXT PRIMARY KEY,
+      state TEXT NOT NULL,
+      observed_key_id TEXT NOT NULL,
+      observed_algorithm TEXT NOT NULL,
+      observed_fingerprint TEXT NOT NULL,
+      observed_public_key BLOB NOT NULL,
+      pinned_key_id TEXT,
+      pinned_algorithm TEXT,
+      pinned_fingerprint TEXT,
+      pinned_public_key BLOB,
+      updated_at INTEGER NOT NULL
     )
   ''');
 
@@ -252,6 +274,126 @@ class SqliteMessageStore implements MessageStore {
     ''', [MessageType.sos.name]);
     return rows.map(_fromRow).toList();
   }
+
+  @override
+  Future<PeerTrustRecord?> getPeerTrust(String peerId) async {
+    final rows = await _db.query(
+      'peer_trust',
+      where: 'peer_id = ?',
+      whereArgs: [peerId],
+    );
+    return rows.isEmpty ? null : _peerTrustFromRow(rows.single);
+  }
+
+  @override
+  Future<PeerTrustRecord> observePeerIdentity(
+    PublicIdentityMaterial identity, {
+    required int nowMillis,
+  }) =>
+      _db.transaction((txn) async {
+        final rows = await txn.query(
+          'peer_trust',
+          where: 'peer_id = ?',
+          whereArgs: [identity.peerId],
+        );
+        final previous = rows.isEmpty ? null : _peerTrustFromRow(rows.single);
+        final updated = PeerTrustTransitions.observe(
+          previous,
+          identity,
+          nowMillis: nowMillis,
+        );
+        await _writePeerTrust(txn, updated);
+        return updated;
+      });
+
+  @override
+  Future<PeerTrustRecord> confirmQrIdentity(
+    QrVerificationChallenge challenge, {
+    required int nowMillis,
+  }) =>
+      _db.transaction((txn) async {
+        final identity = challenge.identity;
+        if (challenge.expectedPeerId != identity.peerId) {
+          throw const PeerTrustException('QR peer ID does not match challenge');
+        }
+        final rows = await txn.query(
+          'peer_trust',
+          where: 'peer_id = ?',
+          whereArgs: [identity.peerId],
+        );
+        final previous = rows.isEmpty ? null : _peerTrustFromRow(rows.single);
+        final verified = PeerTrustTransitions.confirm(
+          previous,
+          identity,
+          nowMillis: nowMillis,
+        );
+        await _writePeerTrust(txn, verified);
+        return verified;
+      });
+
+  @override
+  Future<PeerTrustRecord> blockPeer(
+    String peerId, {
+    required int nowMillis,
+  }) =>
+      _db.transaction((txn) async {
+        final rows = await txn.query(
+          'peer_trust',
+          where: 'peer_id = ?',
+          whereArgs: [peerId],
+        );
+        if (rows.isEmpty) {
+          throw const PeerTrustException(
+            'Cannot block a peer before an identity has been observed',
+          );
+        }
+        final previous = _peerTrustFromRow(rows.single);
+        final blocked = PeerTrustTransitions.block(
+          previous,
+          nowMillis: nowMillis,
+        );
+        await _writePeerTrust(txn, blocked);
+        return blocked;
+      });
+
+  Future<void> _writePeerTrust(
+    DatabaseExecutor db,
+    PeerTrustRecord record,
+  ) =>
+      db.insert(
+        'peer_trust',
+        {
+          'peer_id': record.peerId,
+          'state': record.status.name,
+          'observed_key_id': record.observedKeyId,
+          'observed_algorithm': record.observedAlgorithm,
+          'observed_fingerprint': record.observedFingerprint,
+          'observed_public_key': Uint8List.fromList(record.observedPublicKey),
+          'pinned_key_id': record.pinnedKeyId,
+          'pinned_algorithm': record.pinnedAlgorithm,
+          'pinned_fingerprint': record.pinnedFingerprint,
+          'pinned_public_key': record.pinnedPublicKey == null
+              ? null
+              : Uint8List.fromList(record.pinnedPublicKey!),
+          'updated_at': record.updatedAtMillis,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+
+  PeerTrustRecord _peerTrustFromRow(Map<String, Object?> row) =>
+      PeerTrustRecord(
+        peerId: row['peer_id']! as String,
+        observedKeyId: row['observed_key_id']! as String,
+        observedAlgorithm: row['observed_algorithm']! as String,
+        observedFingerprint: row['observed_fingerprint']! as String,
+        observedPublicKey: row['observed_public_key']! as Uint8List,
+        pinnedKeyId: row['pinned_key_id'] as String?,
+        pinnedAlgorithm: row['pinned_algorithm'] as String?,
+        pinnedFingerprint: row['pinned_fingerprint'] as String?,
+        pinnedPublicKey: row['pinned_public_key'] as Uint8List?,
+        status: PeerTrustStatus.values.byName(row['state']! as String),
+        updatedAtMillis: row['updated_at']! as int,
+      );
 
   @override
   Future<String?> getSetting(String key) async {

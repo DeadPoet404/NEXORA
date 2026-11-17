@@ -80,12 +80,13 @@ void main() {
       isNot(contains(body)),
     );
 
-    // Model a relay with an unrelated decoy signed-prekey record under the
-    // advertised ID, but without Charlie's one-time prekey or session. This
-    // avoids triggering the candidate's unawaited missing-signed-prekey error
-    // while still proving the relay cannot decrypt the one-time-prekey packet.
+    // Give the relay unrelated decoy keypairs under the advertised IDs, but
+    // no session keys. Supplying both records avoids the candidate's unhandled
+    // future on missing-prekey paths; decryption must still fail its MAC check.
+    final decoyPreKey = generatePreKeys(charlie.preKey!.id, 1).single;
     final decoySignedPreKey =
         generateSignedPreKey(relay.identityKeyPair, charlie.signedPreKey!.id);
+    await relay.store.storePreKey(decoyPreKey.id, decoyPreKey);
     await relay.store.storeSignedPreKey(
       decoySignedPreKey.id,
       decoySignedPreKey,
@@ -93,8 +94,10 @@ void main() {
     final relayedBytes = Uint8List.fromList(serialized);
     final relayCipher = SessionCipher.fromStore(relay.store, alice.address);
     await expectLater(
-      relayCipher.decrypt(PreKeySignalMessage(relayedBytes)),
-      throwsA(isA<InvalidKeyIdException>()),
+      Future<Uint8List>.sync(
+        () => relayCipher.decrypt(PreKeySignalMessage(relayedBytes)),
+      ),
+      throwsA(isA<InvalidMessageException>()),
     );
 
     // Attempt tampering against a fresh recipient store so failure cannot

@@ -1,0 +1,3 @@
+# Keep this isolated Dart package independent of the parent Flutter app config.
+linter:
+  rules: []

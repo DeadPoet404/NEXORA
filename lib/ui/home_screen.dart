@@ -15,6 +15,7 @@ import 'chat_screen.dart';
 import 'chats_tab.dart';
 import 'my_identity_qr_screen.dart';
 import 'nearby_tab.dart';
+import 'network_tab.dart';
 import 'settings_sheet.dart';
 import 'sos_tab.dart';
 import 'widgets/signal_bars.dart';
@@ -28,7 +29,8 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen>
     with SingleTickerProviderStateMixin {
-  late final _tabs = TabController(length: 3, vsync: this);
+  static const _sosTabIndex = 3;
+  late final _tabs = TabController(length: 4, vsync: this);
   StreamSubscription<StoredMessage>? _sosSub;
   late final AppLifecycleListener _lifecycle;
   MeshPermissions? _permissions;
@@ -74,7 +76,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     if (peerId == null || !mounted) return;
     Navigator.of(context).popUntil((route) => route.isFirst);
     if (peerId == 'sos') {
-      _tabs.animateTo(2);
+      _tabs.animateTo(_sosTabIndex);
       return;
     }
     await Navigator.of(context).push(MaterialPageRoute(
@@ -94,7 +96,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       action: SnackBarAction(
         label: 'View',
         textColor: scheme.onError,
-        onPressed: () => _tabs.animateTo(2),
+        onPressed: () => _tabs.animateTo(_sosTabIndex),
       ),
     ));
   }
@@ -150,6 +152,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
           tabs: [
             const Tab(text: 'Chats'),
             Tab(text: 'Peers (${peers.length})'),
+            const Tab(text: 'Network'),
             Tab(
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -172,7 +175,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
           Expanded(
             child: TabBarView(
               controller: _tabs,
-              children: const [ChatsTab(), NearbyTab(), SosTab()],
+              children: const [
+                ChatsTab(),
+                NearbyTab(),
+                NetworkTab(),
+                SosTab(),
+              ],
             ),
           ),
         ],
@@ -218,7 +226,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     );
     if (confirmed ?? false) {
       sos.start('');
-      _tabs.animateTo(2);
+      _tabs.animateTo(_sosTabIndex);
     }
   }
 

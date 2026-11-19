@@ -14,6 +14,7 @@ dependencies:
   crypto: ^3.0.7                # SHA-256 display fingerprints only
   flutter_blue_plus: ^2.3.14    # scanning + GATT client (central role)
   flutter_riverpod: ^3.4.3
+  graphview: ^1.5.1             # force-directed layout for the mesh view (MIT)
   mobile_scanner: ^7.5.0        # in-person identity QR scanning
   qr_flutter: ^4.1.0            # identity QR rendering
   geolocator: ^14.1.1           # GPS for SOS, works without internet

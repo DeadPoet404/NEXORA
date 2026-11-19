@@ -25,9 +25,15 @@ final topologySourceProvider =
       transport: transport,
       localNodeId: identity.id,
       localName: identity.name,
-      // Read-only taps into the router's public stream: hops are animated, but
-      // nothing about routing or message handling changes.
-      incomingSenderIds: router.incomingMessages.map((m) => m.message.senderId),
+      // Read-only taps into the router's public streams: hops are animated, but
+      // nothing about routing or message handling changes. Chat messages and
+      // SOS alerts both mean "a frame arrived from this neighbour"; SOS is a
+      // separate stream in the router, so omitting it would silently drop those
+      // hops from the visualization.
+      activityStreams: [
+        router.incomingMessages.map((m) => m.message.senderId),
+        router.sosAlerts.map((m) => m.message.senderId),
+      ],
     );
   }
   ref.onDispose(() => unawaited(source.dispose()));

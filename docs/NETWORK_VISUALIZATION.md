@@ -94,8 +94,10 @@ space the tab gives it, and pinch/drag pans and zooms (with a "centre" button).
 
 ```
 BLE discovery ─► MeshTransport.peers/peerChanges ─┐
-                                                  ├─► LiveMeshTopologySource ─┐
-MeshRouter.incomingMessages (sender ids) ─────────┘                           │
+                                                  │
+MeshRouter.incomingMessages  (sender ids) ────────┤
+MeshRouter.sosAlerts         (sender ids) ────────┼─► LiveMeshTopologySource ─┐
+                                                  │                           │
                                                                               ├─► MeshTopologySnapshot
 SimulatedMeshTopologySource (debug only) ─────────────────────────────────────┘
                                                     │
@@ -110,9 +112,13 @@ SimulatedMeshTopologySource (debug only) ─────────────
 - `MeshTopologySource` is the single seam. A future transport (Wi-Fi Direct,
   LoRa) or a recorded replay can implement it without touching the view.
 - `LiveMeshTopologySource` is a read-only projection of `MeshTransport.peers`.
-  It subscribes to `incomingMessages` **only** to trigger a hop animation.
+  Its `activityStreams` (chat messages and SOS alerts, mapped to sender IDs)
+  exist **only** to trigger a hop animation. SOS is a separate stream in the
+  router, so leaving it out silently drops those hops.
 - Nothing in this path can delay, reorder or drop traffic; streams are observed
-  passively.
+  passively. Hop IDs are unique per event, so two messages from the same
+  neighbour animate as two hops, and an event from an unknown sender (or from
+  this device itself) is ignored rather than drawn.
 
 ## 5. Enabling the simulation
 
@@ -162,10 +168,15 @@ Still not claimed:
 
 ## 7. Checks performed
 
-- No executable checks were run: `flutter`, `dart`, `java`, `gradle` and `adb`
-  are all absent from this environment (`flutter test` is not available), so the
-  added tests are written but **unexecuted**.
-- `git diff --check` (whitespace/conflict markers) — run locally here.
+- This working environment has no `flutter`, `dart`, `java`, `gradle` or `adb`,
+  so **nothing was executed here**. The only local checks are `git diff --check`
+  (clean) and a delimiter/string sanity scan of the edited Dart files.
+- On the maintainer's machine (Flutter 3.50.0, Android toolchain) for the
+  previous commit: debug APK built successfully, `flutter test` passed 55 tests,
+  and `flutter analyze` reported 17 issues — 16 `deprecated_member_use` notices
+  for `package:flutter/material.dart` imports plus one
+  `unused_field` warning (`_incomingSenderIds`). That warning is fixed by this
+  change; the four new hop tests are **not yet run** on that machine.
 
 Run on a machine with the SDK:
 
@@ -192,3 +203,45 @@ hand-edited, because a fabricated checksum would break resolution.
   decision, not a UI one).
 - Node labels come from display names and node IDs, which are self-declared;
   they are not identity proofs and are not verified by the QR flow in this view.
+- Only hops that arrive are animated. Outgoing frames are not observable through
+  the router's public API, so they never produce an animation yet.
+
+## 9. `package:flutter/material.dart` deprecation notices
+
+Flutter 3.50 (with Dart 3.14) formally deprecates the in-framework Material and
+Cupertino libraries in favour of the standalone `material_ui` and `cupertino_ui`
+packages, which reached 1.0 in Flutter 3.47. The analyzer emits one
+`deprecated_member_use` info **per importing file**:
+
+```
+info • 'package:flutter/material.dart' is deprecated and shouldn't be used.
+       Use package:material_ui/material_ui.dart instead. This feature was
+       deprecated after v3.47.0-0.0.pre. • lib/app.dart:1:1 • deprecated_member_use
+```
+
+This project has exactly 16 files importing that library — 13 under `lib/ui/`,
+plus `lib/app.dart`, `lib/main.dart` and
+`lib/visualization/mesh_network_view.dart` — which matches the 16 notices
+reported. They are an expected SDK transition notice, **not** a defect in this
+codebase, and the deprecated import still works on 3.50.
+
+A migration is deliberately out of scope for the visualization milestone because
+it is not an import rename:
+
+1. `material_ui` is a separate copy of Material, not a re-export, so its
+   `Theme`, `ThemeData` and `MaterialLocalizations` are different types. Every
+   file, `lib/app.dart`'s `ThemeData` and the test files must move together.
+2. It adds a dependency and raises the Flutter floor from `>=3.44.0` to
+   `>=3.47` (3.50 for a warning-free analyze), which changes the build
+   requirements for every contributor.
+3. `graphview` still imports `package:flutter/material.dart`; embedding legacy
+   widgets inside a migrated app needs `MaterialUiCompatibilityBridge`, and the
+   bridge does not reconcile type mismatches. This view only uses `graphview`'s
+   layout algorithm (no widgets, no `Theme.of`), so the exposure is small but
+   must be verified on a real build.
+
+Recommended route when it is scheduled as its own milestone: bump Flutter to the
+3.50 line, `flutter pub add material_ui`, run
+`dart fix --apply --code=migrate_design_widgets`, convert the localization
+delegates, then `flutter analyze` and `flutter test` — with the `graphview`
+interaction checked on device.

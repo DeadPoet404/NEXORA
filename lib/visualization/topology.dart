@@ -43,22 +43,6 @@ class TopologyNode {
   final int signalBars;
 
   bool get isLocal => phase == TopologyNodePhase.local;
-
-  bool get hasUsableLink =>
-      phase == TopologyNodePhase.connected ||
-      phase == TopologyNodePhase.connecting;
-
-  TopologyNode copyWith({
-    String? label,
-    TopologyNodePhase? phase,
-    int? signalBars,
-  }) =>
-      TopologyNode(
-        id: id,
-        label: label ?? this.label,
-        phase: phase ?? this.phase,
-        signalBars: signalBars ?? this.signalBars,
-      );
 }
 
 /// Visual state of a connection between two nodes.
@@ -154,10 +138,6 @@ class MeshTopologySnapshot {
   /// True only for development simulations. The view labels these loudly so a
   /// simulated picture is never mistaken for real Bluetooth activity.
   final bool simulated;
-
-  bool get isEmpty => nodes.isEmpty;
-
-  bool get isSimulated => simulated;
 
   TopologyNode? get localNode {
     for (final node in nodes) {

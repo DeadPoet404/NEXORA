@@ -39,7 +39,7 @@ void main() {
         ],
       );
 
-      expect(topology.isSimulated, isFalse);
+      expect(topology.simulated, isFalse);
       expect(topology.localNode?.phase, TopologyNodePhase.local);
       expect(topology.localNode?.label, 'Ama');
       expect(
@@ -140,7 +140,7 @@ void main() {
       final source = LiveMeshTopologySource(
         transport: node.transport,
         localNodeId: 'A',
-        incomingSenderIds: senders.stream,
+        activityStreams: [senders.stream],
       );
       addTearDown(source.dispose);
 
@@ -157,6 +157,105 @@ void main() {
       expect(updates.single.transmissions.length, 1);
       expect(updates.single.transmissions.single.sourceId, 'B');
       expect(updates.single.transmissions.single.targetId, 'A');
+    });
+
+    test('repeated messages each produce their own hop', () async {
+      final network = FakeNetwork();
+      final node = network.addNode('A');
+      network.addNode('B');
+      network.link('A', 'B');
+
+      final senders = StreamController<String>();
+      addTearDown(senders.close);
+      final source = LiveMeshTopologySource(
+        transport: node.transport,
+        localNodeId: 'A',
+        activityStreams: [senders.stream],
+      );
+      addTearDown(source.dispose);
+
+      final updates = <MeshTopologySnapshot>[];
+      final sub = source.changes.listen(updates.add);
+      addTearDown(sub.cancel);
+
+      senders.add('B');
+      senders.add('B');
+      await pumpEventQueue();
+
+      expect(updates.length, 2);
+      final hops = updates.map((snapshot) => snapshot.transmissions.single);
+      expect(hops.map((hop) => hop.id).toSet().length, 2);
+      for (final hop in hops) {
+        expect(hop.sourceId, 'B');
+        expect(hop.targetId, 'A');
+        expect(hop.relayed, isFalse);
+      }
+      // Re-emitting a hop must not change the discovered topology.
+      expect(updates.last.nodes.length, 2);
+      expect(updates.last.links.single.state, TopologyLinkState.up);
+      expect(updates.last.simulated, isFalse);
+    });
+
+    test('ignores unknown senders and this device\'s own node id', () async {
+      final network = FakeNetwork();
+      final node = network.addNode('A');
+      network.addNode('B');
+      network.link('A', 'B');
+
+      final senders = StreamController<String>();
+      addTearDown(senders.close);
+      final source = LiveMeshTopologySource(
+        transport: node.transport,
+        localNodeId: 'A',
+        activityStreams: [senders.stream],
+      );
+      addTearDown(source.dispose);
+
+      final updates = <MeshTopologySnapshot>[];
+      final sub = source.changes.listen(updates.add);
+      addTearDown(sub.cancel);
+
+      senders.add('nobody');
+      senders.add('A');
+      senders.add('');
+      await pumpEventQueue();
+
+      expect(updates, isEmpty);
+    });
+
+    test('watches every activity stream', () async {
+      final network = FakeNetwork();
+      final node = network.addNode('A');
+      network.addNode('B');
+      network.addNode('C');
+      network.link('A', 'B');
+      network.link('A', 'C');
+
+      // Chat messages and SOS alerts are separate router streams.
+      final chats = StreamController<String>();
+      final alerts = StreamController<String>();
+      addTearDown(chats.close);
+      addTearDown(alerts.close);
+      final source = LiveMeshTopologySource(
+        transport: node.transport,
+        localNodeId: 'A',
+        activityStreams: [chats.stream, alerts.stream],
+      );
+      addTearDown(source.dispose);
+
+      final updates = <MeshTopologySnapshot>[];
+      final sub = source.changes.listen(updates.add);
+      addTearDown(sub.cancel);
+
+      chats.add('B');
+      alerts.add('C');
+      await pumpEventQueue();
+
+      expect(updates.length, 2);
+      expect(
+        updates.map((snapshot) => snapshot.transmissions.single.sourceId).toSet(),
+        {'B', 'C'},
+      );
     });
   });
 

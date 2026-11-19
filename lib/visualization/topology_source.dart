@@ -28,36 +28,37 @@ abstract class MeshTopologySource {
 /// Topology built from the real transport's peer discovery.
 ///
 /// This source does not start scanning, send anything, or change any peer's
-/// state: it is a read-only projection of [MeshTransport.peers].
+/// state: it is a read-only projection of [MeshTransport.peers]. Its
+/// [activityStreams] are read-only taps too — each event is the sender node ID
+/// of a frame that just arrived, and is used only to animate a hop.
 class LiveMeshTopologySource implements MeshTopologySource {
   LiveMeshTopologySource({
     required MeshTransport transport,
     required this.localNodeId,
     this.localName = 'This device',
-    Stream<String>? incomingSenderIds,
-  })  : _transport = transport,
-        _incomingSenderIds = incomingSenderIds {
+    this.activityStreams = const <Stream<String>>[],
+  }) : _transport = transport {
     _current = _project(transport.peers, const <TopologyTransmission>[]);
     _peerSub = transport.peerChanges.listen(
       (peers) => _publish(peers, const <TopologyTransmission>[]),
       onError: _emitError,
     );
-    _activitySub = incomingSenderIds?.listen(
-      _onIncomingHop,
-      onError: _emitError,
-    );
+    for (final stream in activityStreams) {
+      _activitySubs.add(stream.listen(_onIncomingHop, onError: _emitError));
+    }
   }
+
+  /// Streams of sender node IDs for frames that just arrived. Each event only
+  /// animates a hop; no message content passes through the visualization.
+  final List<Stream<String>> activityStreams;
 
   final MeshTransport _transport;
   final String localNodeId;
   final String localName;
 
-  /// Sender IDs of messages that just arrived, used only to animate a hop.
-  final Stream<String>? _incomingSenderIds;
-
   final _controller = StreamController<MeshTopologySnapshot>.broadcast();
+  final _activitySubs = <StreamSubscription<String>>[];
   StreamSubscription<List<Peer>>? _peerSub;
-  StreamSubscription<String>? _activitySub;
 
   MeshTopologySnapshot _current = const MeshTopologySnapshot.empty();
   List<Peer> _peers = const <Peer>[];
@@ -121,9 +122,11 @@ class LiveMeshTopologySource implements MeshTopologySource {
     if (_disposed) return;
     _disposed = true;
     await _peerSub?.cancel();
-    await _activitySub?.cancel();
     _peerSub = null;
-    _activitySub = null;
+    for (final subscription in _activitySubs) {
+      await subscription.cancel();
+    }
+    _activitySubs.clear();
     await _controller.close();
   }
 

@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:ui' show Rect;
+import 'dart:ui' show Offset, Rect, Size;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:linkmesh/models/peer.dart';
@@ -605,7 +605,125 @@ void main() {
       expect(before, isNotNull);
       expect(layout.centers['p1'], isNotNull);
     });
+
+    test('produces the same arrangement for the same peer set', () {
+      final first = MeshLayout();
+      final second = MeshLayout();
+      first.update(_ringSnapshot(6));
+      second.update(_ringSnapshot(6));
+
+      expect(first.centers.keys.toSet(), second.centers.keys.toSet());
+      for (final entry in first.centers.entries) {
+        final other = second.centers[entry.key]!;
+        expect(other.dx, closeTo(entry.value.dx, 1e-9));
+        expect(other.dy, closeTo(entry.value.dy, 1e-9));
+      }
+    });
+
+    test('does not drift when the same peers are published again', () {
+      final layout = MeshLayout();
+      layout.update(_ringSnapshot(5));
+      final before = Map<String, Offset>.of(layout.centers);
+
+      // New snapshot instance, new revision, identical peer set: no movement.
+      layout.update(_ringSnapshot(5, revision: 9));
+
+      expect(layout.centers, before);
+    });
+
+    test('never overlaps peers, adding a ring instead of squeezing', () {
+      final layout = MeshLayout();
+      const viewport = Size(360, 520);
+      final topology = _ringSnapshot(10);
+      layout.update(topology, viewport: viewport);
+
+      final centers = layout.centers;
+      final nodes = <String, TopologyNode>{
+        for (final node in topology.nodes) node.id: node,
+      };
+      final ids = centers.keys.toList();
+      expect(ids.length, 11);
+      for (var i = 0; i < ids.length; i++) {
+        for (var j = i + 1; j < ids.length; j++) {
+          final a = centers[ids[i]]!;
+          final b = centers[ids[j]]!;
+          final minimum = layout.radiusFor(nodes[ids[i]]!) +
+              layout.radiusFor(nodes[ids[j]]!);
+          expect((a - b).distance, greaterThanOrEqualTo(minimum - 0.5));
+        }
+      }
+
+      // Ten peers cannot fit on one phone-sized ring, so a second ring is used.
+      final middle = Offset(viewport.width / 2, viewport.height / 2);
+      final peerRadii = <double>{
+        for (final entry in centers.entries)
+          if (entry.key != 'local') (entry.value - middle).distance,
+      };
+      expect(peerRadii.length, greaterThan(1));
+    });
+
+    test('spreads peers further out on a larger canvas', () {
+      final small = MeshLayout();
+      final large = MeshLayout();
+      const smallViewport = Size(320, 400);
+      const largeViewport = Size(900, 700);
+      small.update(_ringSnapshot(4), viewport: smallViewport);
+      large.update(_ringSnapshot(4), viewport: largeViewport);
+
+      double peerDistance(MeshLayout layout, Size viewport) =>
+          (layout.centers['peer-0']! -
+                  Offset(viewport.width / 2, viewport.height / 2))
+              .distance;
+
+      expect(
+        peerDistance(large, largeViewport),
+        greaterThan(peerDistance(small, smallViewport)),
+      );
+    });
+
+    test('derives label width from the ring chord', () {
+      final layout = MeshLayout();
+      layout.update(_ringSnapshot(5));
+
+      expect(layout.labelWidthFor('local'), 132);
+      for (final id in layout.centers.keys) {
+        expect(layout.labelWidthFor(id), greaterThanOrEqualTo(52));
+        expect(layout.labelWidthFor(id), lessThanOrEqualTo(132));
+      }
+      // Five peers leave less room per slot than the centred local label gets.
+      expect(layout.labelWidthFor('peer-0'), lessThan(132));
+    });
   });
+}
+
+/// A phone-sized-ish mesh with a local node and [peerCount] connected peers.
+MeshTopologySnapshot _ringSnapshot(int peerCount, {int revision = 1}) {
+  return MeshTopologySnapshot(
+    localNodeId: 'local',
+    revision: revision,
+    nodes: [
+      const TopologyNode(
+        id: 'local',
+        label: 'This device',
+        phase: TopologyNodePhase.local,
+      ),
+      for (var i = 0; i < peerCount; i++)
+        TopologyNode(
+          id: 'peer-$i',
+          label: 'Peer $i',
+          phase: TopologyNodePhase.connected,
+          signalBars: 3,
+        ),
+    ],
+    links: [
+      for (var i = 0; i < peerCount; i++)
+        TopologyLink(
+          sourceId: 'local',
+          targetId: 'peer-$i',
+          state: TopologyLinkState.up,
+        ),
+    ],
+  );
 }
 
 /// Collects the two independent streams of a [MeshTopologySource] so a test can

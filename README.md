@@ -14,11 +14,13 @@ An experimental, non-commercial showcase of offline messaging over Bluetooth Low
   [docs/NETWORK_VISUALIZATION.md](docs/NETWORK_VISUALIZATION.md).
 
 The network view draws this device, the peers it has discovered, and the links
-between them, using the MIT-licensed `graphview` package for force-directed
-layout. In debug builds the tab starts on a fabricated network so the visuals
-can be developed without phones; a switch moves it to live Bluetooth discovery,
-and release builds cannot show the simulation. The visualization only observes
-peer discovery and incoming-message events, so it cannot make routing
+between them on a dark canvas. Positions come from a hand-written deterministic
+ring layout (no force simulation, so the picture does not drift, and nodes can
+never overlap), and message hops animate as short particles on a separate
+activity stream. In debug builds the tab starts on a fabricated network so the
+visuals can be developed without phones; a switch moves it to live Bluetooth
+discovery, and release builds cannot show the simulation. The visualization only
+observes peer discovery and incoming-message events, so it cannot make routing
 multi-hop-aware and it does not change transport behaviour.
 
 This checkout intentionally omits LinkMesh's iOS/macOS projects and web preview. The relay queue is designed to be stored in SQLite and restored when the router starts; the automated restart test reuses an in-memory store, so it validates router recovery but not process-death durability of the SQLite adapter. Physical app-restart recovery and BLE relay still need device verification. The current protocol does not provide end-to-end encryption or authenticated receipts; see the [security design proposal](docs/SECURITY_DESIGN.md) for the planned threat model and acceptance checks.

@@ -21,6 +21,13 @@ abstract class MeshTopologySource {
   /// Broadcast stream of later snapshots.
   Stream<MeshTopologySnapshot> get changes;
 
+  /// Message hops observed since construction, one event per received frame.
+  ///
+  /// Activity is deliberately separate from [changes]: a hop never rewrites
+  /// [current] or emits a topology snapshot, so every event survives rapid
+  /// bursts and message traffic cannot disturb peer discovery.
+  Stream<TopologyTransmission> get activity;
+
   /// Stops timers and stream subscriptions.
   Future<void> dispose();
 }
@@ -38,11 +45,11 @@ class LiveMeshTopologySource implements MeshTopologySource {
     this.localName = 'This device',
     this.activityStreams = const <Stream<String>>[],
   }) : _transport = transport {
-    _current = _project(transport.peers, const <TopologyTransmission>[]);
-    _peerSub = transport.peerChanges.listen(
-      (peers) => _publish(peers, const <TopologyTransmission>[]),
-      onError: _emitError,
-    );
+    // Seed from the transport's current peers: without this, the first hop
+    // would rebuild the topology from an empty list and drop every peer.
+    _peers = transport.peers;
+    _current = _project(_peers);
+    _peerSub = transport.peerChanges.listen(_publish, onError: _emitError);
     for (final stream in activityStreams) {
       _activitySubs.add(stream.listen(_onIncomingHop, onError: _emitError));
     }
@@ -57,6 +64,7 @@ class LiveMeshTopologySource implements MeshTopologySource {
   final String localName;
 
   final _controller = StreamController<MeshTopologySnapshot>.broadcast();
+  final _activity = StreamController<TopologyTransmission>.broadcast();
   final _activitySubs = <StreamSubscription<String>>[];
   StreamSubscription<List<Peer>>? _peerSub;
 
@@ -75,41 +83,40 @@ class LiveMeshTopologySource implements MeshTopologySource {
   @override
   Stream<MeshTopologySnapshot> get changes => _controller.stream;
 
-  MeshTopologySnapshot _project(
-    List<Peer> peers,
-    List<TopologyTransmission> transmissions,
-  ) =>
-      topologyFromPeers(
+  @override
+  Stream<TopologyTransmission> get activity => _activity.stream;
+
+  MeshTopologySnapshot _project(List<Peer> peers) => topologyFromPeers(
         localNodeId: localNodeId,
         localName: localName,
         peers: peers,
         revision: ++_revision,
-        transmissions: transmissions,
       );
 
-  void _publish(List<Peer> peers, List<TopologyTransmission> transmissions) {
+  void _publish(List<Peer> peers) {
     if (_disposed) return;
     _peers = peers;
-    _current = _project(peers, transmissions);
+    _current = _project(peers);
     if (!_controller.isClosed) _controller.add(_current);
   }
 
-  /// Animates a hop when a message arrives from a known neighbour.
+  /// Reports a hop when a message arrives from a known neighbour.
   ///
   /// The hop is drawn from that neighbour to this device. Messages that
   /// travelled through relays are attributed to the last neighbour seen, which
-  /// is all the local stack can observe.
+  /// is all the local stack can observe. Each accepted frame gets its own ID
+  /// and its own event, so simultaneous messages are never coalesced.
   void _onIncomingHop(String senderId) {
     if (_disposed || senderId.isEmpty || senderId == localNodeId) return;
-    final known = _current.nodeById(senderId);
-    if (known == null) return;
-    final hop = TopologyTransmission(
+    // Unknown senders are ignored. This reads the topology snapshot, which
+    // activity events never mutate, so the check cannot reject a later hop.
+    if (_current.nodeById(senderId) == null) return;
+    if (_activity.isClosed) return;
+    _activity.add(TopologyTransmission(
       id: 'hop-${++_hopSeq}',
       sourceId: senderId,
       targetId: localNodeId,
-    );
-    _current = _project(_peers, <TopologyTransmission>[hop]);
-    if (!_controller.isClosed) _controller.add(_current);
+    ));
   }
 
   void _emitError(Object error, StackTrace stackTrace) {
@@ -128,6 +135,7 @@ class LiveMeshTopologySource implements MeshTopologySource {
     }
     _activitySubs.clear();
     await _controller.close();
+    await _activity.close();
   }
 
   /// Current transport state, for callers that want to explain an empty view.

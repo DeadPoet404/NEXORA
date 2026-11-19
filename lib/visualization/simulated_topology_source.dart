@@ -24,7 +24,7 @@ class SimulatedMeshTopologySource implements MeshTopologySource {
   })  : _random = Random(seed),
         _names = List<String>.of(peerNames) {
     _seedNetwork();
-    _current = _build(_revision, const <TopologyTransmission>[]);
+    _current = _build(_revision);
     if (autoAdvance) {
       _timer = Timer.periodic(interval, (_) => step());
     }
@@ -53,6 +53,7 @@ class SimulatedMeshTopologySource implements MeshTopologySource {
   final List<String> _names;
 
   final _controller = StreamController<MeshTopologySnapshot>.broadcast();
+  final _activity = StreamController<TopologyTransmission>.broadcast();
   final List<_SimPeer> _peers = <_SimPeer>[];
   final List<_SimLink> _relayLinks = <_SimLink>[];
 
@@ -73,14 +74,22 @@ class SimulatedMeshTopologySource implements MeshTopologySource {
   @override
   Stream<MeshTopologySnapshot> get changes => _controller.stream;
 
+  @override
+  Stream<TopologyTransmission> get activity => _activity.stream;
+
   /// Advances the simulation by one tick and publishes the result.
   ///
   /// Tests call this directly so they never depend on wall-clock timers.
   void step() {
     if (_disposed) return;
     _mutateTopology();
-    _current = _build(++_revision, _pickHops());
+    _current = _build(++_revision);
     if (!_controller.isClosed) _controller.add(_current);
+    // Hops are published separately so they never rewrite the topology.
+    for (final hop in _pickHops()) {
+      if (_activity.isClosed) return;
+      _activity.add(hop);
+    }
   }
 
   void _seedNetwork() {
@@ -200,10 +209,7 @@ class SimulatedMeshTopologySource implements MeshTopologySource {
     return links;
   }
 
-  MeshTopologySnapshot _build(
-    int revision,
-    List<TopologyTransmission> hops,
-  ) {
+  MeshTopologySnapshot _build(int revision) {
     final nodes = <TopologyNode>[
       const TopologyNode(
         id: localNodeId,
@@ -223,7 +229,6 @@ class SimulatedMeshTopologySource implements MeshTopologySource {
       localNodeId: localNodeId,
       nodes: List<TopologyNode>.unmodifiable(nodes),
       links: List<TopologyLink>.unmodifiable(_composeLinks()),
-      transmissions: hops,
       revision: revision,
       simulated: true,
     );
@@ -251,6 +256,7 @@ class SimulatedMeshTopologySource implements MeshTopologySource {
     _timer?.cancel();
     _timer = null;
     await _controller.close();
+    await _activity.close();
   }
 }
 

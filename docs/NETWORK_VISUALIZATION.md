@@ -93,17 +93,14 @@ space the tab gives it, and pinch/drag pans and zooms (with a "centre" button).
 ## 4. How the visualization gets its data
 
 ```
-BLE discovery ─► MeshTransport.peers/peerChanges ─┐
-                                                  │
-MeshRouter.incomingMessages  (sender ids) ────────┤
-MeshRouter.sosAlerts         (sender ids) ────────┼─► LiveMeshTopologySource ─┐
-                                                  │                           │
-                                                                              ├─► MeshTopologySnapshot
-SimulatedMeshTopologySource (debug only) ─────────────────────────────────────┘
-                                                    │
-                                        MeshTopologySource.changes
-                                                    │
-                            MeshLayout (graphview force layout) + MeshNetworkView
+BLE discovery ─► MeshTransport.peers/peerChanges ─► LiveMeshTopologySource ─┬─► changes:  MeshTopologySnapshot
+                                                                           │              │
+MeshRouter.incomingMessages (sender ids) ──────────────────────────────────┤              ├─► MeshLayout (graphview)
+MeshRouter.sosAlerts        (sender ids) ──────────────────────────────────┤              │
+                                                                           └─► activity: TopologyTransmission
+                                                                                          │
+SimulatedMeshTopologySource (debug only) ─────────────────────────────────────────────────┤
+                                                                                          └─► MeshNetworkView (hop packets)
 ```
 
 - `MeshTopologySnapshot` is immutable and contains only drawing data: node IDs,
@@ -115,10 +112,15 @@ SimulatedMeshTopologySource (debug only) ─────────────
   Its `activityStreams` (chat messages and SOS alerts, mapped to sender IDs)
   exist **only** to trigger a hop animation. SOS is a separate stream in the
   router, so leaving it out silently drops those hops.
+- Topology and activity are **two independent streams**. `changes` is state
+  (latest snapshot only, idempotent); `activity` is an event log with one event
+  per accepted frame. A hop therefore never re-emits a snapshot, never re-runs
+  the layout, and can never discard peer discovery. Hop IDs are unique per
+  event, so two messages from the same neighbour animate as two hops, an event
+  from an unknown sender (or from this device itself) is ignored, and a burst of
+  simultaneous frames is neither coalesced nor dropped.
 - Nothing in this path can delay, reorder or drop traffic; streams are observed
-  passively. Hop IDs are unique per event, so two messages from the same
-  neighbour animate as two hops, and an event from an unknown sender (or from
-  this device itself) is ignored rather than drawn.
+  passively.
 
 ## 5. Enabling the simulation
 
@@ -176,7 +178,11 @@ Still not claimed:
   and `flutter analyze` reported 17 issues — 16 `deprecated_member_use` notices
   for `package:flutter/material.dart` imports plus one
   `unused_field` warning (`_incomingSenderIds`). That warning is fixed by this
-  change; the four new hop tests are **not yet run** on that machine.
+  change. A later run of that suite showed two hop tests expecting 2 events and
+  receiving 1; the cause was activity being carried *inside* topology snapshots
+  built from a peer list that was never initialised, so the first hop erased the
+  neighbour and every later hop from it was rejected. Activity is now its own
+  stream, and regression tests cover bursts on one and two activity streams.
 
 Run on a machine with the SDK:
 

@@ -143,20 +143,22 @@ void main() {
         activityStreams: [senders.stream],
       );
       addTearDown(source.dispose);
-
-      final updates = <MeshTopologySnapshot>[];
-      final sub = source.changes.listen(updates.add);
-      addTearDown(sub.cancel);
+      final recorder = _Recorder(source);
+      addTearDown(recorder.dispose);
+      final topologyBefore = source.current;
 
       senders.add('B');
       senders.add('unknown-node');
       await pumpEventQueue();
 
       // Only the known neighbour produces a hop; unknown IDs are ignored.
-      expect(updates.length, 1);
-      expect(updates.single.transmissions.length, 1);
-      expect(updates.single.transmissions.single.sourceId, 'B');
-      expect(updates.single.transmissions.single.targetId, 'A');
+      expect(recorder.hops.length, 1);
+      expect(recorder.hops.single.sourceId, 'B');
+      expect(recorder.hops.single.targetId, 'A');
+      expect(recorder.hops.single.relayed, isFalse);
+      // Activity must never re-emit or replace the topology.
+      expect(recorder.snapshots, isEmpty);
+      expect(identical(source.current, topologyBefore), isTrue);
     });
 
     test('repeated messages each produce their own hop', () async {
@@ -173,27 +175,22 @@ void main() {
         activityStreams: [senders.stream],
       );
       addTearDown(source.dispose);
-
-      final updates = <MeshTopologySnapshot>[];
-      final sub = source.changes.listen(updates.add);
-      addTearDown(sub.cancel);
+      final recorder = _Recorder(source);
+      addTearDown(recorder.dispose);
+      final topologyBefore = source.current;
 
       senders.add('B');
       senders.add('B');
       await pumpEventQueue();
 
-      expect(updates.length, 2);
-      final hops = updates.map((snapshot) => snapshot.transmissions.single);
-      expect(hops.map((hop) => hop.id).toSet().length, 2);
-      for (final hop in hops) {
+      expect(recorder.hops.length, 2);
+      expect(recorder.hops.map((hop) => hop.id).toSet().length, 2);
+      for (final hop in recorder.hops) {
         expect(hop.sourceId, 'B');
         expect(hop.targetId, 'A');
-        expect(hop.relayed, isFalse);
       }
-      // Re-emitting a hop must not change the discovered topology.
-      expect(updates.last.nodes.length, 2);
-      expect(updates.last.links.single.state, TopologyLinkState.up);
-      expect(updates.last.simulated, isFalse);
+      expect(recorder.snapshots, isEmpty);
+      expect(identical(source.current, topologyBefore), isTrue);
     });
 
     test('ignores unknown senders and this device\'s own node id', () async {
@@ -210,17 +207,16 @@ void main() {
         activityStreams: [senders.stream],
       );
       addTearDown(source.dispose);
-
-      final updates = <MeshTopologySnapshot>[];
-      final sub = source.changes.listen(updates.add);
-      addTearDown(sub.cancel);
+      final recorder = _Recorder(source);
+      addTearDown(recorder.dispose);
 
       senders.add('nobody');
       senders.add('A');
       senders.add('');
       await pumpEventQueue();
 
-      expect(updates, isEmpty);
+      expect(recorder.hops, isEmpty);
+      expect(recorder.snapshots, isEmpty);
     });
 
     test('watches every activity stream', () async {
@@ -242,20 +238,119 @@ void main() {
         activityStreams: [chats.stream, alerts.stream],
       );
       addTearDown(source.dispose);
-
-      final updates = <MeshTopologySnapshot>[];
-      final sub = source.changes.listen(updates.add);
-      addTearDown(sub.cancel);
+      final recorder = _Recorder(source);
+      addTearDown(recorder.dispose);
 
       chats.add('B');
       alerts.add('C');
       await pumpEventQueue();
 
-      expect(updates.length, 2);
+      expect(recorder.hops.length, 2);
       expect(
-        updates.map((snapshot) => snapshot.transmissions.single.sourceId).toSet(),
+        recorder.hops.map((hop) => hop.sourceId).toSet(),
         {'B', 'C'},
       );
+      expect(recorder.hops.map((hop) => hop.id).toSet().length, 2);
+      expect(recorder.snapshots, isEmpty);
+    });
+
+    test('keeps every discovered peer while hops arrive', () async {
+      final network = FakeNetwork();
+      final node = network.addNode('A');
+      network.addNode('B');
+      network.link('A', 'B');
+
+      final senders = StreamController<String>();
+      addTearDown(senders.close);
+      final source = LiveMeshTopologySource(
+        transport: node.transport,
+        localNodeId: 'A',
+        activityStreams: [senders.stream],
+      );
+      addTearDown(source.dispose);
+      final recorder = _Recorder(source);
+      addTearDown(recorder.dispose);
+
+      senders.add('B');
+      await pumpEventQueue();
+
+      // Regression: a hop used to rebuild the snapshot from an empty peer list,
+      // which dropped the neighbour and then suppressed every later hop.
+      expect(
+        source.current.nodes.map((peer) => peer.id).toList(),
+        ['A', 'B'],
+      );
+      expect(source.current.links.single.state, TopologyLinkState.up);
+    });
+
+    test('delivers a rapid burst from one stream without coalescing',
+        () async {
+      final network = FakeNetwork();
+      final node = network.addNode('A');
+      network.addNode('B');
+      network.link('A', 'B');
+
+      final senders = StreamController<String>();
+      addTearDown(senders.close);
+      final source = LiveMeshTopologySource(
+        transport: node.transport,
+        localNodeId: 'A',
+        activityStreams: [senders.stream],
+      );
+      addTearDown(source.dispose);
+      final recorder = _Recorder(source);
+      addTearDown(recorder.dispose);
+      final topologyBefore = source.current;
+
+      // Eight frames arrive back to back, with no await between them.
+      for (var i = 0; i < 8; i++) {
+        senders.add('B');
+      }
+      await pumpEventQueue();
+
+      expect(recorder.hops.length, 8);
+      expect(recorder.hops.map((hop) => hop.id).toSet().length, 8);
+      expect(recorder.hops.every((hop) => hop.sourceId == 'B'), isTrue);
+      expect(recorder.snapshots, isEmpty);
+      expect(identical(source.current, topologyBefore), isTrue);
+    });
+
+    test('delivers a rapid burst interleaved across activity streams',
+        () async {
+      final network = FakeNetwork();
+      final node = network.addNode('A');
+      network.addNode('B');
+      network.addNode('C');
+      network.link('A', 'B');
+      network.link('A', 'C');
+
+      final chats = StreamController<String>();
+      final alerts = StreamController<String>();
+      addTearDown(chats.close);
+      addTearDown(alerts.close);
+      final source = LiveMeshTopologySource(
+        transport: node.transport,
+        localNodeId: 'A',
+        activityStreams: [chats.stream, alerts.stream],
+      );
+      addTearDown(source.dispose);
+      final recorder = _Recorder(source);
+      addTearDown(recorder.dispose);
+      final topologyBefore = source.current;
+
+      for (var i = 0; i < 4; i++) {
+        chats.add('B');
+        alerts.add('C');
+      }
+      await pumpEventQueue();
+
+      expect(recorder.hops.length, 8);
+      expect(recorder.hops.map((hop) => hop.id).toSet().length, 8);
+      expect(recorder.hops.where((hop) => hop.sourceId == 'B').length, 4);
+      expect(recorder.hops.where((hop) => hop.sourceId == 'C').length, 4);
+      expect(recorder.snapshots, isEmpty);
+      expect(identical(source.current, topologyBefore), isTrue);
+      expect(source.current.nodes.length, 3);
     });
   });
 
@@ -289,24 +384,33 @@ void main() {
       addTearDown(source.dispose);
 
       final snapshots = <MeshTopologySnapshot>[];
+      final hops = <TopologyTransmission>[];
       final sub = source.changes.listen(snapshots.add);
       addTearDown(sub.cancel);
+      final hopSub = source.activity.listen(hops.add);
+      addTearDown(hopSub.cancel);
 
       for (var i = 0; i < 60; i++) {
         source.step();
       }
       await pumpEventQueue();
 
+      expect(hops, isNotEmpty);
       for (final snapshot in snapshots) {
         final ids = snapshot.nodes.map((node) => node.id).toSet();
         for (final link in snapshot.links) {
           expect(ids, contains(link.sourceId));
           expect(ids, contains(link.targetId));
         }
-        for (final hop in snapshot.transmissions) {
-          expect(ids, contains(hop.sourceId));
-          expect(ids, contains(hop.targetId));
-        }
+      }
+      // Hops travel separately; every endpoint must still be a real node.
+      final knownIds = <String>{
+        for (final snapshot in snapshots)
+          for (final node in snapshot.nodes) node.id,
+      };
+      for (final hop in hops) {
+        expect(knownIds, contains(hop.sourceId));
+        expect(knownIds, contains(hop.targetId));
       }
     });
 
@@ -315,8 +419,11 @@ void main() {
       addTearDown(source.dispose);
 
       final snapshots = <MeshTopologySnapshot>[];
+      final activity = <TopologyTransmission>[];
       final sub = source.changes.listen(snapshots.add);
       addTearDown(sub.cancel);
+      final hopSub = source.activity.listen(activity.add);
+      addTearDown(hopSub.cancel);
 
       for (var i = 0; i < 60; i++) {
         source.step();
@@ -339,10 +446,7 @@ void main() {
       expect(allIds.length, greaterThan(counts.reduce((a, b) => a > b ? a : b)));
       expect(phases.length, greaterThan(2));
       expect(linkStates, contains(TopologyLinkState.up));
-      expect(
-        snapshots.any((snapshot) => snapshot.transmissions.isNotEmpty),
-        isTrue,
-      );
+      expect(activity, isNotEmpty);
     });
 
     test('dispose closes the stream and is idempotent', () async {
@@ -502,4 +606,24 @@ void main() {
       expect(layout.centers['p1'], isNotNull);
     });
   });
+}
+
+/// Collects the two independent streams of a [MeshTopologySource] so a test can
+/// assert that hops arrive without any topology snapshot being emitted.
+class _Recorder {
+  _Recorder(MeshTopologySource source) {
+    _hopSub = source.activity.listen(hops.add);
+    _snapshotSub = source.changes.listen(snapshots.add);
+  }
+
+  final hops = <TopologyTransmission>[];
+  final snapshots = <MeshTopologySnapshot>[];
+
+  late final StreamSubscription<TopologyTransmission> _hopSub;
+  late final StreamSubscription<MeshTopologySnapshot> _snapshotSub;
+
+  Future<void> dispose() async {
+    await _hopSub.cancel();
+    await _snapshotSub.cancel();
+  }
 }

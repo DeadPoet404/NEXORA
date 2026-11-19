@@ -43,10 +43,10 @@ class _MeshNetworkViewState extends State<MeshNetworkView>
 
   final _scene = _MeshScene();
   final _frame = ValueNotifier<double>(0);
-  final _seenHops = <String>{};
 
   Ticker? _ticker;
   StreamSubscription<MeshTopologySnapshot>? _sub;
+  StreamSubscription<TopologyTransmission>? _activitySub;
   Duration _lastElapsed = Duration.zero;
   MeshTopologySnapshot _topology = const MeshTopologySnapshot.empty();
 
@@ -76,7 +76,7 @@ class _MeshNetworkViewState extends State<MeshNetworkView>
     super.didUpdateWidget(oldWidget);
     if (identical(oldWidget.source, widget.source)) return;
     _sub?.cancel();
-    _seenHops.clear();
+    _activitySub?.cancel();
     _scene.nodes.clear();
     _scene.links.clear();
     _scene.packets.clear();
@@ -94,6 +94,8 @@ class _MeshNetworkViewState extends State<MeshNetworkView>
 
   void _listen(MeshTopologySource source) {
     _sub = source.changes.listen(_onSnapshot, onError: _onSourceError);
+    // Hops arrive on their own stream and never trigger a rebuild or relayout.
+    _activitySub = source.activity.listen(_spawnHop, onError: _onSourceError);
   }
 
   void _onSourceError(Object error, StackTrace stackTrace) {
@@ -104,6 +106,8 @@ class _MeshNetworkViewState extends State<MeshNetworkView>
   void dispose() {
     _sub?.cancel();
     _sub = null;
+    _activitySub?.cancel();
+    _activitySub = null;
     _ticker?.stop();
     _ticker?.dispose();
     _ticker = null;
@@ -161,11 +165,6 @@ class _MeshNetworkViewState extends State<MeshNetworkView>
     for (final visual in _scene.links.values) {
       if (!linkIds.contains(visual.id)) visual.removed = true;
     }
-
-    for (final hop in _topology.transmissions) {
-      if (_seenHops.add(hop.id)) _spawnHop(hop);
-    }
-    if (_seenHops.length > 256) _seenHops.clear();
   }
 
   void _spawnHop(TopologyTransmission hop) {

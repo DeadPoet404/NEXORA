@@ -106,13 +106,14 @@ class TopologyTransmission {
 /// Immutable view of the mesh at one moment.
 ///
 /// The visualization consumes only this type, so it never touches BLE,
-/// routing or storage code.
+/// routing or storage code. Message hops are *not* part of the snapshot: they
+/// travel on `MeshTopologySource.activity`, so an arriving message can never
+/// alter the discovered topology.
 class MeshTopologySnapshot {
   const MeshTopologySnapshot({
     required this.localNodeId,
     required this.nodes,
     required this.links,
-    this.transmissions = const <TopologyTransmission>[],
     this.revision = 0,
     this.simulated = false,
   });
@@ -122,16 +123,12 @@ class MeshTopologySnapshot {
       : localNodeId = '',
         nodes = const <TopologyNode>[],
         links = const <TopologyLink>[],
-        transmissions = const <TopologyTransmission>[],
         revision = -1,
         simulated = false;
 
   final String localNodeId;
   final List<TopologyNode> nodes;
   final List<TopologyLink> links;
-
-  /// Hops that happened just before this snapshot was published.
-  final List<TopologyTransmission> transmissions;
 
   final int revision;
 
@@ -187,7 +184,6 @@ MeshTopologySnapshot topologyFromPeers({
   required String localName,
   required Iterable<Peer> peers,
   int revision = 0,
-  List<TopologyTransmission> transmissions = const <TopologyTransmission>[],
 }) {
   final nodes = <TopologyNode>[];
   final links = <TopologyLink>[];
@@ -226,7 +222,6 @@ MeshTopologySnapshot topologyFromPeers({
     localNodeId: localNodeId,
     nodes: List<TopologyNode>.unmodifiable(nodes),
     links: List<TopologyLink>.unmodifiable(links),
-    transmissions: transmissions,
     revision: revision,
   );
 }
